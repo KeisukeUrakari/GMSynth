@@ -433,6 +433,16 @@ bool GMSynthAudioProcessor::isXgMode() const noexcept
     return synthEngine.isXgMode();
 }
 
+const xg::PartParameters& GMSynthAudioProcessor::getPartParameters (int channel) const noexcept
+{
+    return synthEngine.getPartParameters (channel);
+}
+
+const xg::DrumSetup& GMSynthAudioProcessor::getDrumSetup (int setupIndex) const noexcept
+{
+    return synthEngine.getDrumSetup (setupIndex);
+}
+
 void GMSynthAudioProcessor::setMasterVolumeDb (float decibels) noexcept
 {
     const auto clampedDecibels = juce::jlimit (-96.0f, 0.0f, decibels);

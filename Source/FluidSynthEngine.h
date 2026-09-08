@@ -58,6 +58,10 @@ public:
     void setMasterGain (float gain) noexcept;
     float getMasterGain() const noexcept;
 
+    const xg::PartParameters& getPartParameters (int channel) const noexcept;
+    const xg::DrumSetup& getDrumSetup (int setupIndex) const noexcept;
+    const xg::NrpnState& getNrpnState (int channel) const noexcept;
+
 private:
     struct PresetLocation
     {
@@ -120,6 +124,21 @@ private:
     void handleProgramChange (int channel, int program) noexcept;
     void handleSysEx (const juce::uint8* data, int numBytes) noexcept;
     void resetChannelState (int channel) noexcept;
+    void handleNrpnDataEntry (int channel, int value, bool isMsb) noexcept;
+    void handleNrpnDataIncDec (int channel, int delta) noexcept;
+    void setPartFilterCutoff (int channel, int value) noexcept;
+    void setPartFilterResonance (int channel, int value) noexcept;
+    void setPartEgAttack (int channel, int value) noexcept;
+    void setPartEgDecay (int channel, int value) noexcept;
+    void setPartEgRelease (int channel, int value) noexcept;
+    void setPartVibratoRate (int channel, int value) noexcept;
+    void setPartVibratoDepth (int channel, int value) noexcept;
+    void setPartVibratoDelay (int channel, int value) noexcept;
+    void setPartReverbSend (int channel, int value) noexcept;
+    void setPartChorusSend (int channel, int value) noexcept;
+    void setPartVariationSend (int channel, int value) noexcept;
+    void resetAllGenerators (int channel) noexcept;
+    void applyDrumNoteGenerators (fluid_voice_t* voice, const xg::DrumNoteParameters& noteParams) noexcept;
     void renderRange (const juce::MidiBuffer& midiMessages,
                       int rangeStart,
                       int rangeLength,
@@ -140,6 +159,11 @@ private:
     std::array<std::atomic<bool>, numMidiChannels> drumPartProtectMode;
     std::array<std::atomic<int>, numMidiChannels> channelProgram;
     std::atomic<float> masterGain { 0.8f };
+
+    std::array<xg::NrpnState, numMidiChannels> nrpnStates;
+    std::array<xg::PartParameters, numMidiChannels> partParameters;
+    xg::DrumSetup drumSetup1;
+    xg::DrumSetup drumSetup2;
 
     juce::AbstractFifo retiredFifo { maxRetiredChanges };
     std::array<RetiredChange, maxRetiredChanges> retiredChanges;

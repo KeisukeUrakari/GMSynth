@@ -76,6 +76,8 @@ public:
     void setChannelProgram (int channel, int value) noexcept;
 
     bool isXgMode() const noexcept;
+    const xg::PartParameters& getPartParameters (int channel) const noexcept;
+    const xg::DrumSetup& getDrumSetup (int setupIndex) const noexcept;
 
     void setMasterVolumeDb (float decibels) noexcept;
     float getMasterVolumeDb() const noexcept;
