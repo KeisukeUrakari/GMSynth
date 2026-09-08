@@ -408,9 +408,29 @@ void GMSynthAudioProcessor::setChannelBank (int channel, int value) noexcept
     synthEngine.setChannelBank (channel, value);
 }
 
+void GMSynthAudioProcessor::setChannelBankMsb (int channel, int value) noexcept
+{
+    synthEngine.setChannelBankMsb (channel, value);
+}
+
+void GMSynthAudioProcessor::setChannelBankLsb (int channel, int value) noexcept
+{
+    synthEngine.setChannelBankLsb (channel, value);
+}
+
+void GMSynthAudioProcessor::setChannelPartMode (int channel, xg::PartMode mode) noexcept
+{
+    synthEngine.setChannelPartMode (channel, mode);
+}
+
 void GMSynthAudioProcessor::setChannelProgram (int channel, int value) noexcept
 {
     synthEngine.setChannelProgram (channel, value);
+}
+
+bool GMSynthAudioProcessor::isXgMode() const noexcept
+{
+    return synthEngine.isXgMode();
 }
 
 void GMSynthAudioProcessor::setMasterVolumeDb (float decibels) noexcept

@@ -50,16 +50,28 @@ FluidSynthEngine::FluidSynthEngine()
 
     for (int channel = 0; channel < numMidiChannels; ++channel)
     {
-        channelVolume[static_cast<size_t> (channel)].store (127, std::memory_order_relaxed);
-        channelPan[static_cast<size_t> (channel)].store (64, std::memory_order_relaxed);
-        channelBank[static_cast<size_t> (channel)].store (0, std::memory_order_relaxed);
-        channelProgram[static_cast<size_t> (channel)].store (0, std::memory_order_relaxed);
+        const auto index = static_cast<size_t> (channel);
+        channelVolume[index].store (127, std::memory_order_relaxed);
+        channelPan[index].store (64, std::memory_order_relaxed);
+
+        const auto isDrum = (channel == 9);
+        const auto msb = isDrum ? xg::bankMsbDrumKit : xg::bankMsbNormal;
+        const auto lsb = 0;
+        channelBankMsb[index].store (msb, std::memory_order_relaxed);
+        channelBankLsb[index].store (lsb, std::memory_order_relaxed);
+        channelBank[index].store ((msb << 7) | lsb, std::memory_order_relaxed);
+        channelPartMode[index].store (static_cast<uint8_t> (isDrum ? xg::PartMode::Drum : xg::PartMode::Normal), std::memory_order_relaxed);
+        drumPartProtectMode[index].store (isDrum, std::memory_order_relaxed);
+        channelProgram[index].store (0, std::memory_order_relaxed);
     }
 
     appliedChannelMute.fill (false);
     appliedChannelVolume.fill (-1);
     appliedChannelPan.fill (-1);
     appliedChannelBank.fill (-1);
+    appliedChannelBankMsb.fill (-1);
+    appliedChannelBankLsb.fill (-1);
+    appliedChannelPartMode.fill (255);
     appliedChannelProgram.fill (-1);
     reclaimerThread.reset (new ReclaimerThread (*this));
 }
@@ -233,7 +245,8 @@ const FluidSynthEngine::PresetLocation* FluidSynthEngine::findPresetInBank (cons
 void FluidSynthEngine::applyProgramChangeToSynth (SynthInstance& instance,
                                                    int channel,
                                                    int program,
-                                                   int requestedBank) noexcept
+                                                   int requestedBank,
+                                                   bool isPercussionChannel) noexcept
 {
     if (instance.synth == nullptr
         || ! juce::isPositiveAndBelow (channel, numMidiChannels)
@@ -242,63 +255,80 @@ void FluidSynthEngine::applyProgramChangeToSynth (SynthInstance& instance,
 
     const auto& allPresetsForProgram = instance.presetsByProgram[static_cast<size_t> (program)];
     const auto& percussionPresetsForProgram = instance.percussionPresetsByProgram[static_cast<size_t> (program)];
-    const auto isPercussionChannel = channel == 9 || requestedBank >= 128;
-    const auto& preferredPresets = isPercussionChannel
-        ? percussionPresetsForProgram
-        : allPresetsForProgram;
 
-    // A GM drum channel must never select a melodic preset from bank 0. The
-    // MIDI program number selects the drum kit (for example, 0 is Standard
-    // Kit and 16 is the GM Power/Rock-style kit), while the preset itself
-    // must come from the percussion bank.
-    const auto& presetsForRequestedBank = isPercussionChannel
-        ? percussionPresetsForProgram
-        : allPresetsForProgram;
+    fluid_synth_set_channel_type (instance.synth, channel,
+                                  isPercussionChannel ? CHANNEL_TYPE_DRUM : CHANNEL_TYPE_MELODIC);
 
-    // Select the exact preset when it exists. Using program_select here avoids
-    // relying on the replacement synth's default bank/program after a reload.
-    if (const auto* requestedPreset = findPresetInBank (presetsForRequestedBank, requestedBank);
-        requestedPreset != nullptr)
+    const PresetLocation* chosen = nullptr;
+
+    if (isPercussionChannel)
+    {
+        // 1. Try exact requested bank in percussion presets (e.g. XG drum bank 16256)
+        chosen = findPresetInBank (percussionPresetsForProgram, requestedBank);
+
+        // 2. If not found, try standard SF2 percussion bank 128
+        if (chosen == nullptr && requestedBank != 128)
+            chosen = findPresetInBank (percussionPresetsForProgram, 128);
+
+        // 3. If not found, fallback to Standard Kit (Program 0) at bank 128
+        if (chosen == nullptr)
+        {
+            const auto& stdKitPresets = instance.percussionPresetsByProgram[0];
+            chosen = findPresetInBank (stdKitPresets, 128);
+            if (chosen == nullptr && ! stdKitPresets.empty())
+                chosen = &stdKitPresets.front();
+        }
+
+        // 4. If still not found, try any preset for this program in percussion banks
+        if (chosen == nullptr && ! percussionPresetsForProgram.empty())
+            chosen = &percussionPresetsForProgram.front();
+
+        // 5. Global lowest percussion preset
+        if (chosen == nullptr && instance.hasLowestPercussionPreset)
+            chosen = &instance.lowestPercussionPreset;
+
+        // 6. Any preset available
+        if (chosen == nullptr && instance.hasLowestPreset)
+            chosen = &instance.lowestPreset;
+    }
+    else
+    {
+        // 1. Try exact requested bank for melodic program
+        chosen = findPresetInBank (allPresetsForProgram, requestedBank);
+
+        // 2. XG fallback rule: Try basic GM voice set (Bank 0) for this program
+        if (chosen == nullptr && requestedBank != 0)
+            chosen = findPresetInBank (allPresetsForProgram, 0);
+
+        // 3. Try any available bank for this program
+        if (chosen == nullptr && ! allPresetsForProgram.empty())
+            chosen = &allPresetsForProgram.front();
+
+        // 4. Global lowest preset
+        if (chosen == nullptr && instance.hasLowestPreset)
+            chosen = &instance.lowestPreset;
+    }
+
+    if (chosen != nullptr)
     {
         if (fluid_synth_program_select (instance.synth,
                                         channel,
-                                        requestedPreset->sfontId,
-                                        requestedPreset->bank,
-                                        requestedPreset->program) == FLUID_OK)
+                                        chosen->sfontId,
+                                        chosen->bank,
+                                        chosen->program) == FLUID_OK)
+        {
+            if (requestedBank != chosen->bank)
+                fluid_synth_bank_select (instance.synth, channel, requestedBank);
             return;
+        }
 
-        fluid_synth_bank_select (instance.synth, channel, requestedBank);
-        if (fluid_synth_program_change (instance.synth, channel, program) == FLUID_OK)
+        fluid_synth_bank_select (instance.synth, channel, chosen->bank);
+        if (fluid_synth_program_change (instance.synth, channel, chosen->program) == FLUID_OK)
+        {
+            if (requestedBank != chosen->bank)
+                fluid_synth_bank_select (instance.synth, channel, requestedBank);
             return;
-    }
-
-    const PresetLocation* fallback = preferredPresets.empty() ? nullptr : &preferredPresets.front();
-
-    if (fallback == nullptr)
-    {
-        if (isPercussionChannel && instance.hasLowestPercussionPreset)
-            fallback = &instance.lowestPercussionPreset;
-        else if (! isPercussionChannel && instance.hasLowestPreset)
-            fallback = &instance.lowestPreset;
-    }
-
-    if (fallback == nullptr)
-    {
-        fluid_synth_program_change (instance.synth, channel, program);
-        return;
-    }
-
-    if (fluid_synth_program_select (instance.synth,
-                                    channel,
-                                    fallback->sfontId,
-                                    fallback->bank,
-                                    fallback->program) == FLUID_OK)
-    {
-        // Keep the MIDI bank selection intact. This makes the next program
-        // change resolve against the original requested bank again.
-        if (requestedBank != fallback->bank)
-            fluid_synth_bank_select (instance.synth, channel, requestedBank);
-        return;
+        }
     }
 
     fluid_synth_program_change (instance.synth, channel, program);
@@ -316,21 +346,17 @@ void FluidSynthEngine::initializeSynthChannelState (SynthInstance& instance) noe
         const auto volume = juce::jlimit (0, 127, channelVolume[index].load (std::memory_order_acquire));
         const auto pan = juce::jlimit (0, 127, channelPan[index].load (std::memory_order_acquire));
         const auto bank = juce::jlimit (0, 16383, channelBank[index].load (std::memory_order_acquire));
+        const auto bankMsb = juce::jlimit (0, 127, channelBankMsb[index].load (std::memory_order_acquire));
+        const auto partMode = static_cast<xg::PartMode> (channelPartMode[index].load (std::memory_order_acquire));
+        const auto isPercussion = xg::isDrumMode (partMode) || bankMsb == xg::bankMsbDrumKit || bankMsb == xg::bankMsbSfxKit;
         const auto program = juce::jlimit (0, 127, channelProgram[index].load (std::memory_order_acquire));
 
+        fluid_synth_set_channel_type (instance.synth, channel, isPercussion ? CHANNEL_TYPE_DRUM : CHANNEL_TYPE_MELODIC);
         fluid_synth_cc (instance.synth, channel, 7, muted ? 0 : volume);
         fluid_synth_cc (instance.synth, channel, 10, pan);
         fluid_synth_bank_select (instance.synth, channel, bank);
 
-        int selectedSfont = 0;
-        int selectedBank = bank;
-        int selectedProgram = 0;
-        fluid_synth_get_program (instance.synth,
-                                 channel,
-                                 &selectedSfont,
-                                 &selectedBank,
-                                 &selectedProgram);
-        applyProgramChangeToSynth (instance, channel, program, selectedBank);
+        applyProgramChangeToSynth (instance, channel, program, bank, isPercussion);
     }
 }
 
@@ -383,10 +409,19 @@ FluidSynthEngine::ChannelState FluidSynthEngine::getChannelState (int channel) c
         return state;
 
     const auto index = static_cast<size_t> (channel);
+    const auto partModeRaw = channelPartMode[index].load (std::memory_order_acquire);
+    const auto msb = channelBankMsb[index].load (std::memory_order_acquire);
+    const auto lsb = channelBankLsb[index].load (std::memory_order_acquire);
+    const auto partMode = static_cast<xg::PartMode> (partModeRaw);
+
     state.volume = channelVolume[index].load (std::memory_order_acquire);
     state.pan = channelPan[index].load (std::memory_order_acquire);
     state.bank = channelBank[index].load (std::memory_order_acquire);
+    state.bankMsb = msb;
+    state.bankLsb = lsb;
     state.program = channelProgram[index].load (std::memory_order_acquire);
+    state.partMode = partMode;
+    state.isDrum = xg::isDrumMode (partMode) || msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit;
     return state;
 }
 
@@ -401,14 +436,70 @@ void FluidSynthEngine::setChannelPan (int channel, int value) noexcept
 {
     if (juce::isPositiveAndBelow (channel, numMidiChannels))
         channelPan[static_cast<size_t> (channel)].store (juce::jlimit (0, 127, value),
-                                                          std::memory_order_release);
+                                                           std::memory_order_release);
 }
 
 void FluidSynthEngine::setChannelBank (int channel, int value) noexcept
 {
-    if (juce::isPositiveAndBelow (channel, numMidiChannels))
-        channelBank[static_cast<size_t> (channel)].store (juce::jlimit (0, 16383, value),
-                                                           std::memory_order_release);
+    if (! juce::isPositiveAndBelow (channel, numMidiChannels))
+        return;
+
+    const auto index = static_cast<size_t> (channel);
+    const auto clamped = juce::jlimit (0, 16383, value);
+    const auto msb = (clamped >> 7) & 0x7f;
+    const auto lsb = clamped & 0x7f;
+    channelBankMsb[index].store (msb, std::memory_order_release);
+    channelBankLsb[index].store (lsb, std::memory_order_release);
+    channelBank[index].store (clamped, std::memory_order_release);
+
+    if (msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit)
+        channelPartMode[index].store (static_cast<uint8_t> (xg::PartMode::Drum), std::memory_order_release);
+    else if (msb == xg::bankMsbNormal)
+        channelPartMode[index].store (static_cast<uint8_t> (xg::PartMode::Normal), std::memory_order_release);
+
+    channelStateNeedsApply = true;
+}
+
+void FluidSynthEngine::setChannelBankMsb (int channel, int msb) noexcept
+{
+    if (! juce::isPositiveAndBelow (channel, numMidiChannels))
+        return;
+
+    const auto index = static_cast<size_t> (channel);
+    const auto clampedMsb = juce::jlimit (0, 127, msb);
+    channelBankMsb[index].store (clampedMsb, std::memory_order_release);
+    const auto lsb = channelBankLsb[index].load (std::memory_order_acquire);
+    channelBank[index].store ((clampedMsb << 7) | lsb, std::memory_order_release);
+
+    if (clampedMsb == xg::bankMsbDrumKit || clampedMsb == xg::bankMsbSfxKit)
+        channelPartMode[index].store (static_cast<uint8_t> (xg::PartMode::Drum), std::memory_order_release);
+    else if (clampedMsb == xg::bankMsbNormal)
+        channelPartMode[index].store (static_cast<uint8_t> (xg::PartMode::Normal), std::memory_order_release);
+
+    channelStateNeedsApply = true;
+}
+
+void FluidSynthEngine::setChannelBankLsb (int channel, int lsb) noexcept
+{
+    if (! juce::isPositiveAndBelow (channel, numMidiChannels))
+        return;
+
+    const auto index = static_cast<size_t> (channel);
+    const auto clampedLsb = juce::jlimit (0, 127, lsb);
+    channelBankLsb[index].store (clampedLsb, std::memory_order_release);
+    const auto msb = channelBankMsb[index].load (std::memory_order_acquire);
+    channelBank[index].store ((msb << 7) | clampedLsb, std::memory_order_release);
+    channelStateNeedsApply = true;
+}
+
+void FluidSynthEngine::setChannelPartMode (int channel, xg::PartMode mode) noexcept
+{
+    if (! juce::isPositiveAndBelow (channel, numMidiChannels))
+        return;
+
+    const auto index = static_cast<size_t> (channel);
+    channelPartMode[index].store (static_cast<uint8_t> (mode), std::memory_order_release);
+    channelStateNeedsApply = true;
 }
 
 void FluidSynthEngine::setChannelProgram (int channel, int value) noexcept
@@ -416,6 +507,16 @@ void FluidSynthEngine::setChannelProgram (int channel, int value) noexcept
     if (juce::isPositiveAndBelow (channel, numMidiChannels))
         channelProgram[static_cast<size_t> (channel)].store (juce::jlimit (0, 127, value),
                                                               std::memory_order_release);
+}
+
+bool FluidSynthEngine::isXgMode() const noexcept
+{
+    return isXgModeActive.load (std::memory_order_acquire);
+}
+
+void FluidSynthEngine::setXgMode (bool enabled) noexcept
+{
+    isXgModeActive.store (enabled, std::memory_order_release);
 }
 
 void FluidSynthEngine::setMasterGain (float gain) noexcept
@@ -434,9 +535,18 @@ void FluidSynthEngine::resetChannelState (int channel) noexcept
         return;
 
     const auto index = static_cast<size_t> (channel);
-    channelVolume[index].store (127, std::memory_order_release);
-    channelPan[index].store (64, std::memory_order_release);
-    channelBank[index].store (0, std::memory_order_release);
+    const auto xgActive = isXgModeActive.load (std::memory_order_acquire);
+    channelVolume[index].store (xgActive ? xg::defaultVolume : 127, std::memory_order_release);
+    channelPan[index].store (xg::defaultPan, std::memory_order_release);
+
+    const auto isDrum = (channel == 9);
+    const auto msb = isDrum ? xg::bankMsbDrumKit : xg::bankMsbNormal;
+    const auto lsb = 0;
+    channelBankMsb[index].store (msb, std::memory_order_release);
+    channelBankLsb[index].store (lsb, std::memory_order_release);
+    channelBank[index].store ((msb << 7) | lsb, std::memory_order_release);
+    channelPartMode[index].store (static_cast<uint8_t> (isDrum ? xg::PartMode::Drum : xg::PartMode::Normal), std::memory_order_release);
+    drumPartProtectMode[index].store (isDrum, std::memory_order_release);
     channelProgram[index].store (0, std::memory_order_release);
 }
 
@@ -459,8 +569,99 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
         && data[6] == 0x7f
         && data[7] == 0x00;
 
-    if (! isGmReset && ! isGsReset)
+    const auto isXgSystemOn = numBytes >= 7
+        && data[0] == 0x43
+        && (data[1] & 0xf0) == 0x10
+        && data[2] == 0x4c
+        && data[3] == 0x00
+        && data[4] == 0x00
+        && data[5] == 0x7e
+        && data[6] == 0x00;
+
+    const auto isXgAllParamReset = numBytes >= 7
+        && data[0] == 0x43
+        && (data[1] & 0xf0) == 0x10
+        && data[2] == 0x4c
+        && data[3] == 0x00
+        && data[4] == 0x00
+        && data[5] == 0x7f
+        && data[6] == 0x00;
+
+    const auto isXgMultiPart = numBytes >= 7
+        && data[0] == 0x43
+        && (data[1] & 0xf0) == 0x10
+        && data[2] == 0x4c
+        && data[3] == 0x08;
+
+    if (isGmReset)
+    {
+        isXgModeActive.store (false, std::memory_order_release);
+    }
+    else if (isXgSystemOn || isXgAllParamReset)
+    {
+        isXgModeActive.store (true, std::memory_order_release);
+    }
+    else if (isXgMultiPart)
+    {
+        const auto part = data[4] & 0x1f; // 0..15
+        const auto param = data[5];
+        const auto val = data[6];
+
+        if (juce::isPositiveAndBelow (static_cast<int> (part), numMidiChannels))
+        {
+            const auto index = static_cast<size_t> (part);
+            if (param == 0x01) // Bank Select MSB
+            {
+                channelBankMsb[index].store (val, std::memory_order_release);
+                channelBank[index].store ((val << 7) | channelBankLsb[index].load (std::memory_order_acquire), std::memory_order_release);
+                if (val == xg::bankMsbDrumKit || val == xg::bankMsbSfxKit)
+                    channelPartMode[index].store (static_cast<uint8_t> (xg::PartMode::Drum), std::memory_order_release);
+                else if (val == xg::bankMsbNormal)
+                    channelPartMode[index].store (static_cast<uint8_t> (xg::PartMode::Normal), std::memory_order_release);
+                channelStateNeedsApply = true;
+            }
+            else if (param == 0x02) // Bank Select LSB
+            {
+                channelBankLsb[index].store (val, std::memory_order_release);
+                channelBank[index].store ((channelBankMsb[index].load (std::memory_order_acquire) << 7) | val, std::memory_order_release);
+                channelStateNeedsApply = true;
+            }
+            else if (param == 0x03) // Program Number
+            {
+                channelProgram[index].store (val, std::memory_order_release);
+                channelStateNeedsApply = true;
+            }
+            else if (param == 0x07) // Part Mode (0: Normal, 1: Drum, 2..5: Drums 1..4)
+            {
+                const auto mode = static_cast<xg::PartMode> (val);
+                channelPartMode[index].store (static_cast<uint8_t> (mode), std::memory_order_release);
+                if (mode == xg::PartMode::Normal)
+                {
+                    if (channelBankMsb[index].load (std::memory_order_acquire) >= 126)
+                    {
+                        channelBankMsb[index].store (0, std::memory_order_release);
+                        channelBank[index].store (channelBankLsb[index].load (std::memory_order_acquire), std::memory_order_release);
+                    }
+                    if (part == 9)
+                        drumPartProtectMode[9].store (false, std::memory_order_release);
+                }
+                else
+                {
+                    if (channelBankMsb[index].load (std::memory_order_acquire) < 126)
+                    {
+                        channelBankMsb[index].store (xg::bankMsbDrumKit, std::memory_order_release);
+                        channelBank[index].store ((xg::bankMsbDrumKit << 7) | channelBankLsb[index].load (std::memory_order_acquire), std::memory_order_release);
+                    }
+                }
+                channelStateNeedsApply = true;
+            }
+        }
         return;
+    }
+    else if (! isGsReset)
+    {
+        return;
+    }
 
     if (activeSynth != nullptr)
     {
@@ -472,11 +673,20 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
                            nullptr,
                            &handled,
                            0);
-        fluid_synth_set_channel_type (activeSynth->synth, 9, CHANNEL_TYPE_DRUM);
     }
 
     for (int channel = 0; channel < numMidiChannels; ++channel)
         resetChannelState (channel);
+
+    if (activeSynth != nullptr)
+    {
+        for (int channel = 0; channel < numMidiChannels; ++channel)
+        {
+            const auto partMode = static_cast<xg::PartMode> (channelPartMode[static_cast<size_t> (channel)].load (std::memory_order_acquire));
+            const auto isDrum = xg::isDrumMode (partMode);
+            fluid_synth_set_channel_type (activeSynth->synth, channel, isDrum ? CHANNEL_TYPE_DRUM : CHANNEL_TYPE_MELODIC);
+        }
+    }
 
     channelStateNeedsApply = true;
 }
@@ -485,8 +695,6 @@ void FluidSynthEngine::applyChannelState() noexcept
 {
     if (activeSynth == nullptr)
         return;
-
-    fluid_synth_set_channel_type (activeSynth->synth, 9, CHANNEL_TYPE_DRUM);
 
     const auto needsApply = channelStateNeedsApply;
     const auto desiredMasterGain = masterGain.load (std::memory_order_acquire);
@@ -503,7 +711,19 @@ void FluidSynthEngine::applyChannelState() noexcept
         const auto volume = juce::jlimit (0, 127, channelVolume[index].load (std::memory_order_acquire));
         const auto pan = juce::jlimit (0, 127, channelPan[index].load (std::memory_order_acquire));
         const auto bank = juce::jlimit (0, 16383, channelBank[index].load (std::memory_order_acquire));
+        const auto bankMsb = juce::jlimit (0, 127, channelBankMsb[index].load (std::memory_order_acquire));
+        const auto bankLsb = juce::jlimit (0, 127, channelBankLsb[index].load (std::memory_order_acquire));
+        const auto partModeRaw = channelPartMode[index].load (std::memory_order_acquire);
         const auto program = juce::jlimit (0, 127, channelProgram[index].load (std::memory_order_acquire));
+
+        const auto partMode = static_cast<xg::PartMode> (partModeRaw);
+        const auto isDrum = xg::isDrumMode (partMode) || bankMsb == xg::bankMsbDrumKit || bankMsb == xg::bankMsbSfxKit;
+
+        if (needsApply || partModeRaw != appliedChannelPartMode[index])
+        {
+            fluid_synth_set_channel_type (activeSynth->synth, channel, isDrum ? CHANNEL_TYPE_DRUM : CHANNEL_TYPE_MELODIC);
+            appliedChannelPartMode[index] = partModeRaw;
+        }
 
         if (needsApply || volume != appliedChannelVolume[index]
             || muted != appliedChannelMute[index])
@@ -524,6 +744,8 @@ void FluidSynthEngine::applyChannelState() noexcept
         {
             fluid_synth_bank_select (activeSynth->synth, channel, bank);
             appliedChannelBank[index] = bank;
+            appliedChannelBankMsb[index] = bankMsb;
+            appliedChannelBankLsb[index] = bankLsb;
         }
 
         if (bankChanged || needsApply || program != appliedChannelProgram[index])
@@ -541,20 +763,15 @@ void FluidSynthEngine::handleProgramChange (int channel, int program) noexcept
     if (activeSynth == nullptr || ! juce::isPositiveAndBelow (program, 128))
         return;
 
-    int currentSfont = 0;
-    int requestedBank = 0;
-    int currentProgram = 0;
+    const auto index = static_cast<size_t> (channel);
+    const auto requestedBank = channelBank[index].load (std::memory_order_acquire);
+    const auto partModeRaw = channelPartMode[index].load (std::memory_order_acquire);
+    const auto msb = channelBankMsb[index].load (std::memory_order_acquire);
+    const auto partMode = static_cast<xg::PartMode> (partModeRaw);
+    const auto isPercussion = xg::isDrumMode (partMode) || msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit;
 
-    if (fluid_synth_get_program (activeSynth->synth,
-                                 channel,
-                                 &currentSfont,
-                                 &requestedBank,
-                                 &currentProgram) != FLUID_OK)
-    {
-        requestedBank = channelBank[static_cast<size_t> (channel)].load (std::memory_order_acquire);
-    }
-
-    applyProgramChangeToSynth (*activeSynth, channel, program, requestedBank);
+    fluid_synth_set_channel_type (activeSynth->synth, channel, isPercussion ? CHANNEL_TYPE_DRUM : CHANNEL_TYPE_MELODIC);
+    applyProgramChangeToSynth (*activeSynth, channel, program, requestedBank, isPercussion);
 }
 
 void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noexcept
@@ -612,8 +829,9 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
 
         if (message.isResetAllControllers())
         {
-            channelVolume[index].store (127, std::memory_order_release);
-            channelPan[index].store (64, std::memory_order_release);
+            const auto xgActive = isXgModeActive.load (std::memory_order_acquire);
+            channelVolume[index].store (xgActive ? xg::defaultVolume : 127, std::memory_order_release);
+            channelPan[index].store (xg::defaultPan, std::memory_order_release);
             if (activeSynth != nullptr)
                 fluid_synth_cc (activeSynth->synth, channel, controller, value);
             channelStateNeedsApply = true;
@@ -622,15 +840,34 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
 
         if (controller == 0)
         {
-            const auto currentBank = channelBank[index].load (std::memory_order_acquire);
-            channelBank[index].store ((value << 7) | (currentBank & 0x7f),
-                                      std::memory_order_release);
+            if (channel == 9 && drumPartProtectMode[9].load (std::memory_order_acquire) && value < 126)
+            {
+                // Protected drum channel ignores melodic Bank MSB 0..125
+            }
+            else
+            {
+                channelBankMsb[index].store (value, std::memory_order_release);
+                const auto lsb = channelBankLsb[index].load (std::memory_order_acquire);
+                channelBank[index].store ((value << 7) | (lsb & 0x7f), std::memory_order_release);
+
+                if (value == xg::bankMsbDrumKit || value == xg::bankMsbSfxKit)
+                    channelPartMode[index].store (static_cast<uint8_t> (xg::PartMode::Drum), std::memory_order_release);
+                else if (value == xg::bankMsbNormal)
+                    channelPartMode[index].store (static_cast<uint8_t> (xg::PartMode::Normal), std::memory_order_release);
+            }
         }
         else if (controller == 32)
         {
-            const auto currentBank = channelBank[index].load (std::memory_order_acquire);
-            channelBank[index].store ((currentBank & 0x3f80) | value,
-                                      std::memory_order_release);
+            const auto partModeRaw = channelPartMode[index].load (std::memory_order_acquire);
+            const auto msb = channelBankMsb[index].load (std::memory_order_acquire);
+            const auto isDrum = xg::isDrumMode (static_cast<xg::PartMode> (partModeRaw)) || msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit;
+
+            // XG note 4: Bank LSB is ignored/fixed to 0 for drum kit
+            if (! isDrum)
+            {
+                channelBankLsb[index].store (value, std::memory_order_release);
+                channelBank[index].store ((msb << 7) | value, std::memory_order_release);
+            }
         }
 
         if (controller == 7)
@@ -649,14 +886,23 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
             return;
 
         fluid_synth_cc (activeSynth->synth, channel, controller, value);
-        if (channel == 9 && (controller == 0 || controller == 32))
-            fluid_synth_set_channel_type (activeSynth->synth, 9, CHANNEL_TYPE_DRUM);
+        if (controller == 0)
+        {
+            const auto partModeRaw = channelPartMode[index].load (std::memory_order_acquire);
+            const auto msb = channelBankMsb[index].load (std::memory_order_acquire);
+            const auto isDrum = xg::isDrumMode (static_cast<xg::PartMode> (partModeRaw)) || msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit;
+            fluid_synth_set_channel_type (activeSynth->synth, channel, isDrum ? CHANNEL_TYPE_DRUM : CHANNEL_TYPE_MELODIC);
+        }
         if (controller == 7)
             appliedChannelVolume[index] = channelVolume[index].load (std::memory_order_acquire);
         else if (controller == 10)
             appliedChannelPan[index] = channelPan[index].load (std::memory_order_acquire);
         else if (controller == 0 || controller == 32)
+        {
             appliedChannelBank[index] = channelBank[index].load (std::memory_order_acquire);
+            appliedChannelBankMsb[index] = channelBankMsb[index].load (std::memory_order_acquire);
+            appliedChannelBankLsb[index] = channelBankLsb[index].load (std::memory_order_acquire);
+        }
     }
     else if (message.isProgramChange())
     {

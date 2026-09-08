@@ -70,7 +70,12 @@ public:
     void setChannelVolume (int channel, int value) noexcept;
     void setChannelPan (int channel, int value) noexcept;
     void setChannelBank (int channel, int value) noexcept;
+    void setChannelBankMsb (int channel, int value) noexcept;
+    void setChannelBankLsb (int channel, int value) noexcept;
+    void setChannelPartMode (int channel, xg::PartMode mode) noexcept;
     void setChannelProgram (int channel, int value) noexcept;
+
+    bool isXgMode() const noexcept;
 
     void setMasterVolumeDb (float decibels) noexcept;
     float getMasterVolumeDb() const noexcept;

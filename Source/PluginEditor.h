@@ -98,6 +98,7 @@ private:
     };
 
     std::unique_ptr<StateUpdateTimer> stateUpdateTimer;
+    bool previousXgMode = false;
     //[/UserVariables]
 
     //==============================================================================

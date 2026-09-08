@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include <fluidsynth.h>
+#include "XgModel.h"
 
 #include <array>
 #include <atomic>
@@ -35,14 +36,24 @@ public:
         int volume = 127;
         int pan = 64;
         int bank = 0;
+        int bankMsb = 0;
+        int bankLsb = 0;
         int program = 0;
+        xg::PartMode partMode = xg::PartMode::Normal;
+        bool isDrum = false;
     };
 
     ChannelState getChannelState (int channel) const noexcept;
     void setChannelVolume (int channel, int value) noexcept;
     void setChannelPan (int channel, int value) noexcept;
     void setChannelBank (int channel, int value) noexcept;
+    void setChannelBankMsb (int channel, int value) noexcept;
+    void setChannelBankLsb (int channel, int value) noexcept;
+    void setChannelPartMode (int channel, xg::PartMode mode) noexcept;
     void setChannelProgram (int channel, int value) noexcept;
+
+    bool isXgMode() const noexcept;
+    void setXgMode (bool enabled) noexcept;
 
     void setMasterGain (float gain) noexcept;
     float getMasterGain() const noexcept;
@@ -98,7 +109,8 @@ private:
     static void applyProgramChangeToSynth (SynthInstance& instance,
                                            int channel,
                                            int program,
-                                           int requestedBank) noexcept;
+                                           int requestedBank,
+                                           bool isPercussionChannel) noexcept;
 
     void requestChange (SynthChange* change);
     void adoptPendingChange() noexcept;
@@ -115,12 +127,17 @@ private:
                       float* right) noexcept;
     void reclaimRetired() noexcept;
 
+    std::atomic<bool> isXgModeActive { false };
     std::atomic<SynthChange*> pendingChange { nullptr };
     std::atomic<double> currentSampleRate { 44100.0 };
     std::array<std::atomic<bool>, numMidiChannels> channelMuted;
     std::array<std::atomic<int>, numMidiChannels> channelVolume;
     std::array<std::atomic<int>, numMidiChannels> channelPan;
     std::array<std::atomic<int>, numMidiChannels> channelBank;
+    std::array<std::atomic<int>, numMidiChannels> channelBankMsb;
+    std::array<std::atomic<int>, numMidiChannels> channelBankLsb;
+    std::array<std::atomic<uint8_t>, numMidiChannels> channelPartMode;
+    std::array<std::atomic<bool>, numMidiChannels> drumPartProtectMode;
     std::array<std::atomic<int>, numMidiChannels> channelProgram;
     std::atomic<float> masterGain { 0.8f };
 
@@ -134,6 +151,9 @@ private:
     std::array<int, numMidiChannels> appliedChannelVolume;
     std::array<int, numMidiChannels> appliedChannelPan;
     std::array<int, numMidiChannels> appliedChannelBank;
+    std::array<int, numMidiChannels> appliedChannelBankMsb;
+    std::array<int, numMidiChannels> appliedChannelBankLsb;
+    std::array<uint8_t, numMidiChannels> appliedChannelPartMode;
     std::array<int, numMidiChannels> appliedChannelProgram;
     float appliedMasterGain = 0.8f;
     juce::AudioBuffer<float> scratchBuffer;

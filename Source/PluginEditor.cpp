@@ -1094,6 +1094,17 @@ void GMSynthAudioProcessorEditor::paint (juce::Graphics& g)
     g.fillAll (juce::Colour (0xff323e44));
 
     //[UserPaint] Add your own custom painting code here..
+    {
+        const auto xgActive = audioProcessor.isXgMode();
+        const juce::Rectangle<int> badgeBounds (544, 40, 68, 24);
+        g.setColour (xgActive ? juce::Colour (0xff1b5e20) : juce::Colour (0xff263238));
+        g.fillRoundedRectangle (badgeBounds.toFloat(), 4.0f);
+        g.setColour (xgActive ? juce::Colour (0xff81c784) : juce::Colour (0xff546e7a));
+        g.drawRoundedRectangle (badgeBounds.toFloat(), 4.0f, 1.0f);
+        g.setColour (xgActive ? juce::Colour (0xffe8f5e9) : juce::Colour (0xff90a4ae));
+        g.setFont (juce::Font (juce::FontOptions { 12.0f, juce::Font::bold }));
+        g.drawText (xgActive ? "XG ON" : "XG OFF", badgeBounds, juce::Justification::centred);
+    }
     //[/UserPaint]
 }
 
@@ -1577,15 +1588,25 @@ void GMSynthAudioProcessorEditor::configureChannelStateLabels()
         auto* bankLabel = bankLabels[static_cast<size_t> (channel)];
         auto* programLabel = programLabels[static_cast<size_t> (channel)];
 
+        bankLabel->setFont (juce::Font (juce::FontOptions { 12.0f, juce::Font::plain }.withMetricsKind (juce::TypefaceMetricsKind::legacy)));
         bankLabel->setEditable (false, true, false);
         bankLabel->setTooltip ("MIDI bank for channel " + juce::String (channel + 1)
-                               + " (double-click to edit)");
+                               + " (MSB:LSB, double-click to edit)");
         bankLabel->onTextChange = [this, channel, bankLabel]
         {
-            audioProcessor.setChannelBank (channel,
-                                           juce::jlimit (0,
-                                                        16383,
-                                                        bankLabel->getText().getIntValue()));
+            const auto text = bankLabel->getText().trim();
+            int newBank = 0;
+            if (text.contains (":"))
+            {
+                const auto msb = text.upToFirstOccurrenceOf (":", false, false).getIntValue();
+                const auto lsb = text.fromFirstOccurrenceOf (":", false, false).getIntValue();
+                newBank = (juce::jlimit (0, 127, msb) << 7) | juce::jlimit (0, 127, lsb);
+            }
+            else
+            {
+                newBank = text.getIntValue();
+            }
+            audioProcessor.setChannelBank (channel, juce::jlimit (0, 16383, newBank));
         };
 
         programLabel->setEditable (false, true, false);
@@ -1605,6 +1626,13 @@ void GMSynthAudioProcessorEditor::updateChannelStateControls()
 {
     if (sliderVolume != nullptr && ! sliderVolume->isMouseButtonDown())
         sliderVolume->setValue (audioProcessor.getMasterVolumeDb(), juce::dontSendNotification);
+
+    const auto currentXgMode = audioProcessor.isXgMode();
+    if (currentXgMode != previousXgMode)
+    {
+        previousXgMode = currentXgMode;
+        repaint();
+    }
 
     const std::array<juce::TextButton*, 16> channelButtons
     {
@@ -1660,11 +1688,20 @@ void GMSynthAudioProcessorEditor::updateChannelStateControls()
         if (! panSliders[index]->isMouseButtonDown())
             panSliders[index]->setValue (state.pan, juce::dontSendNotification);
 
+        const auto outlineCol = state.isDrum ? juce::Colour (0xffffb74d) : juce::Colour (0xff8e989b);
+
         if (! bankLabels[index]->isBeingEdited())
-            bankLabels[index]->setText (juce::String (state.bank), juce::dontSendNotification);
+        {
+            bankLabels[index]->setText (juce::String (state.bankMsb) + ":" + juce::String (state.bankLsb),
+                                        juce::dontSendNotification);
+            bankLabels[index]->setColour (juce::Label::outlineColourId, outlineCol);
+        }
 
         if (! programLabels[index]->isBeingEdited())
+        {
             programLabels[index]->setText (juce::String (state.program), juce::dontSendNotification);
+            programLabels[index]->setColour (juce::Label::outlineColourId, outlineCol);
+        }
     }
 
     if (buttonLog != nullptr)
