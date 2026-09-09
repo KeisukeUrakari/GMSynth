@@ -972,6 +972,22 @@ GMSynthAudioProcessorEditor::GMSynthAudioProcessorEditor (GMSynthAudioProcessor&
         configureChannelButton (*channelButtons[static_cast<size_t> (channel)], channel);
 
     configureChannelStateLabels();
+    modeComboBox = std::make_unique<juce::ComboBox> ("modeComboBox");
+    addAndMakeVisible (modeComboBox.get());
+    modeComboBox->addItem ("Auto", 1);
+    modeComboBox->addItem ("GM",   2);
+    modeComboBox->addItem ("GS",   3);
+    modeComboBox->addItem ("XG",   4);
+    modeComboBox->setSelectedId (static_cast<int> (audioProcessor.getEngineMode()) + 1, juce::dontSendNotification);
+    modeComboBox->onChange = [this]()
+    {
+        const auto id = modeComboBox->getSelectedId();
+        if (id >= 1 && id <= 4)
+            audioProcessor.setEngineMode (static_cast<FluidSynthEngine::EngineMode> (id - 1));
+        repaint();
+    };
+    modeComboBox->setBounds (596, 40, 94, 24);
+
     stateUpdateTimer = std::make_unique<StateUpdateTimer> (*this);
     stateUpdateTimer->start();
     buttonLog->setButtonText (audioProcessor.isMidiLogging() ? "Stop Logging" : "Start Logging");
@@ -984,6 +1000,7 @@ GMSynthAudioProcessorEditor::~GMSynthAudioProcessorEditor()
 {
     //[Destructor_pre]. You can add your own custom destruction code here..
     stateUpdateTimer.reset();
+    modeComboBox = nullptr;
     //[/Destructor_pre]
 
     labelVolume = nullptr;
@@ -1095,15 +1112,41 @@ void GMSynthAudioProcessorEditor::paint (juce::Graphics& g)
 
     //[UserPaint] Add your own custom painting code here..
     {
-        const auto xgActive = audioProcessor.isXgMode();
-        const juce::Rectangle<int> badgeBounds (544, 40, 68, 24);
-        g.setColour (xgActive ? juce::Colour (0xff1b5e20) : juce::Colour (0xff263238));
+        const auto activeMode = audioProcessor.getActiveMode();
+        const juce::Rectangle<int> badgeBounds (536, 40, 52, 24);
+
+        juce::Colour bgCol, borderCol, textCol;
+        juce::String badgeText;
+
+        if (activeMode == FluidSynthEngine::ActiveMode::GS)
+        {
+            bgCol = juce::Colour (0xff0d47a1);     // Deep Blue
+            borderCol = juce::Colour (0xff42a5f5); // Light Blue
+            textCol = juce::Colour (0xffe3f2fd);
+            badgeText = "GS";
+        }
+        else if (activeMode == FluidSynthEngine::ActiveMode::XG)
+        {
+            bgCol = juce::Colour (0xff1b5e20);     // Dark Green
+            borderCol = juce::Colour (0xff81c784); // Light Green
+            textCol = juce::Colour (0xffe8f5e9);
+            badgeText = "XG";
+        }
+        else
+        {
+            bgCol = juce::Colour (0xff263238);     // Blue Grey
+            borderCol = juce::Colour (0xff546e7a);
+            textCol = juce::Colour (0xffcfd8dc);
+            badgeText = "GM";
+        }
+
+        g.setColour (bgCol);
         g.fillRoundedRectangle (badgeBounds.toFloat(), 4.0f);
-        g.setColour (xgActive ? juce::Colour (0xff81c784) : juce::Colour (0xff546e7a));
+        g.setColour (borderCol);
         g.drawRoundedRectangle (badgeBounds.toFloat(), 4.0f, 1.0f);
-        g.setColour (xgActive ? juce::Colour (0xffe8f5e9) : juce::Colour (0xff90a4ae));
+        g.setColour (textCol);
         g.setFont (juce::Font (juce::FontOptions { 12.0f, juce::Font::bold }));
-        g.drawText (xgActive ? "XG ON" : "XG OFF", badgeBounds, juce::Justification::centred);
+        g.drawText (badgeText, badgeBounds, juce::Justification::centred);
     }
     //[/UserPaint]
 }
@@ -1627,10 +1670,14 @@ void GMSynthAudioProcessorEditor::updateChannelStateControls()
     if (sliderVolume != nullptr && ! sliderVolume->isMouseButtonDown())
         sliderVolume->setValue (audioProcessor.getMasterVolumeDb(), juce::dontSendNotification);
 
-    const auto currentXgMode = audioProcessor.isXgMode();
-    if (currentXgMode != previousXgMode)
+    const auto currentActiveMode = audioProcessor.getActiveMode();
+    const auto currentEngineMode = audioProcessor.getEngineMode();
+    if (currentActiveMode != previousActiveMode || currentEngineMode != previousEngineMode)
     {
-        previousXgMode = currentXgMode;
+        previousActiveMode = currentActiveMode;
+        previousEngineMode = currentEngineMode;
+        if (modeComboBox != nullptr && ! modeComboBox->isPopupActive())
+            modeComboBox->setSelectedId (static_cast<int> (currentEngineMode) + 1, juce::dontSendNotification);
         repaint();
     }
 

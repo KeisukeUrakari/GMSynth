@@ -61,6 +61,7 @@ FluidSynthEngine::FluidSynthEngine()
         channelBankLsb[index].store (lsb, std::memory_order_relaxed);
         channelBank[index].store ((msb << 7) | lsb, std::memory_order_relaxed);
         channelPartMode[index].store (static_cast<uint8_t> (isDrum ? xg::PartMode::Drum : xg::PartMode::Normal), std::memory_order_relaxed);
+        channelGsPartMode[index].store (static_cast<uint8_t> (isDrum ? gs::PartMode::Drum1 : gs::PartMode::Normal), std::memory_order_relaxed);
         drumPartProtectMode[index].store (isDrum, std::memory_order_relaxed);
         channelProgram[index].store (0, std::memory_order_relaxed);
     }
@@ -72,6 +73,15 @@ FluidSynthEngine::FluidSynthEngine()
         part.reset();
     drumSetup1.reset();
     drumSetup2.reset();
+
+    gsSystemParameters.reset();
+    for (int channel = 0; channel < numMidiChannels; ++channel)
+        gsPartParameters[static_cast<size_t> (channel)].reset (channel);
+    gsDrumSetup1.reset();
+    gsDrumSetup2.reset();
+    gsReverbParameters.reset();
+    gsChorusParameters.reset();
+    gsDelayParameters.reset();
 
     for (auto& chanMap : activeNoteTransposition)
         for (size_t n = 0; n < 128; ++n)
@@ -274,6 +284,9 @@ void FluidSynthEngine::applyProgramChangeToSynth (SynthInstance& instance,
                                                    int channel,
                                                    int program,
                                                    int requestedBank,
+                                                   int bankMsb,
+                                                   int bankLsb,
+                                                   ActiveMode activeMode,
                                                    bool isPercussionChannel) noexcept
 {
     if (instance.synth == nullptr
@@ -298,7 +311,11 @@ void FluidSynthEngine::applyProgramChangeToSynth (SynthInstance& instance,
         if (chosen == nullptr && requestedBank != 128)
             chosen = findPresetInBank (percussionPresetsForProgram, 128);
 
-        // 3. If not found, fallback to Standard Kit (Program 0) at bank 128
+        // 3. If in GS mode and map specified, check map-offset
+        if (chosen == nullptr && activeMode == ActiveMode::GS && bankLsb > 0)
+            chosen = findPresetInBank (percussionPresetsForProgram, 128 + bankLsb);
+
+        // 4. Fallback to Standard Kit (Program 0) at bank 128
         if (chosen == nullptr)
         {
             const auto& stdKitPresets = instance.percussionPresetsByProgram[0];
@@ -307,34 +324,64 @@ void FluidSynthEngine::applyProgramChangeToSynth (SynthInstance& instance,
                 chosen = &stdKitPresets.front();
         }
 
-        // 4. If still not found, try any preset for this program in percussion banks
+        // 5. If still not found, try any preset for this program in percussion banks
         if (chosen == nullptr && ! percussionPresetsForProgram.empty())
             chosen = &percussionPresetsForProgram.front();
 
-        // 5. Global lowest percussion preset
+        // 6. Global lowest percussion preset
         if (chosen == nullptr && instance.hasLowestPercussionPreset)
             chosen = &instance.lowestPercussionPreset;
 
-        // 6. Any preset available
+        // 7. Any preset available
         if (chosen == nullptr && instance.hasLowestPreset)
             chosen = &instance.lowestPreset;
     }
     else
     {
-        // 1. Try exact requested bank for melodic program
-        chosen = findPresetInBank (allPresetsForProgram, requestedBank);
+        if (activeMode == ActiveMode::GS)
+        {
+            // GS Hierarchical Fallback Strategy:
+            // 1. If map specified (e.g. SC-88 map), check map-offset or 14-bit bank first
+            if (bankLsb > 0)
+            {
+                chosen = findPresetInBank (allPresetsForProgram, (bankLsb * 128) + bankMsb);
+                if (chosen == nullptr)
+                    chosen = findPresetInBank (allPresetsForProgram, (bankMsb << 7) | bankLsb);
+            }
 
-        // 2. XG fallback rule: Try basic GM voice set (Bank 0) for this program
-        if (chosen == nullptr && requestedBank != 0)
-            chosen = findPresetInBank (allPresetsForProgram, 0);
+            // 2. SC-55 Map / Direct Variation Bank (Bank == CC#0)
+            if (chosen == nullptr && bankMsb > 0)
+                chosen = findPresetInBank (allPresetsForProgram, bankMsb);
 
-        // 3. Try any available bank for this program
-        if (chosen == nullptr && ! allPresetsForProgram.empty())
-            chosen = &allPresetsForProgram.front();
+            // 3. Capital Tone: Bank 0
+            if (chosen == nullptr)
+                chosen = findPresetInBank (allPresetsForProgram, 0);
 
-        // 4. Global lowest preset
-        if (chosen == nullptr && instance.hasLowestPreset)
-            chosen = &instance.lowestPreset;
+            // 4. Any available bank for this program
+            if (chosen == nullptr && ! allPresetsForProgram.empty())
+                chosen = &allPresetsForProgram.front();
+
+            // 5. Global lowest preset
+            if (chosen == nullptr && instance.hasLowestPreset)
+                chosen = &instance.lowestPreset;
+        }
+        else
+        {
+            // 1. Try exact requested bank for melodic program
+            chosen = findPresetInBank (allPresetsForProgram, requestedBank);
+
+            // 2. XG fallback rule: Try basic GM voice set (Bank 0) for this program
+            if (chosen == nullptr && requestedBank != 0)
+                chosen = findPresetInBank (allPresetsForProgram, 0);
+
+            // 3. Try any available bank for this program
+            if (chosen == nullptr && ! allPresetsForProgram.empty())
+                chosen = &allPresetsForProgram.front();
+
+            // 4. Global lowest preset
+            if (chosen == nullptr && instance.hasLowestPreset)
+                chosen = &instance.lowestPreset;
+        }
     }
 
     if (chosen != nullptr)
@@ -382,8 +429,13 @@ void FluidSynthEngine::initializeSynthChannelState (SynthInstance& instance) noe
         const auto pan = juce::jlimit (0, 127, channelPan[index].load (std::memory_order_acquire));
         const auto bank = juce::jlimit (0, 16383, channelBank[index].load (std::memory_order_acquire));
         const auto bankMsb = juce::jlimit (0, 127, channelBankMsb[index].load (std::memory_order_acquire));
+        const auto bankLsb = juce::jlimit (0, 127, channelBankLsb[index].load (std::memory_order_acquire));
+        const auto activeMode = getActiveMode();
+        const auto gsMode = (activeMode == ActiveMode::GS);
+        const auto gsPart = static_cast<gs::PartMode> (channelGsPartMode[index].load (std::memory_order_acquire));
         const auto partMode = static_cast<xg::PartMode> (channelPartMode[index].load (std::memory_order_acquire));
-        const auto isPercussion = xg::isDrumMode (partMode) || bankMsb == xg::bankMsbDrumKit || bankMsb == xg::bankMsbSfxKit;
+        const auto isPercussion = gsMode ? gs::isDrumMode (gsPart)
+                                         : (xg::isDrumMode (partMode) || bankMsb == xg::bankMsbDrumKit || bankMsb == xg::bankMsbSfxKit);
         const auto program = juce::jlimit (0, 127, channelProgram[index].load (std::memory_order_acquire));
 
         fluid_synth_set_channel_type (instance.synth, channel, isPercussion ? CHANNEL_TYPE_DRUM : CHANNEL_TYPE_MELODIC);
@@ -391,26 +443,33 @@ void FluidSynthEngine::initializeSynthChannelState (SynthInstance& instance) noe
         fluid_synth_cc (instance.synth, channel, 10, pan);
         fluid_synth_bank_select (instance.synth, channel, bank);
 
-        applyProgramChangeToSynth (instance, channel, program, bank, isPercussion);
+        applyProgramChangeToSynth (instance, channel, program, bank, bankMsb, bankLsb, activeMode, isPercussion);
 
-        const auto& params = partParameters[index];
-        const auto totalCents = systemParameters.masterTuneCents + params.detuneCents;
-        fluid_synth_set_gen (instance.synth, channel, GEN_FINETUNE, totalCents);
+        if (gsMode)
+        {
+            fluid_synth_set_gen (instance.synth, channel, GEN_FINETUNE, gsSystemParameters.masterTuneCents + gsPartParameters[index].pitchOffsetFineCents);
+        }
+        else
+        {
+            const auto& params = partParameters[index];
+            const auto totalCents = systemParameters.masterTuneCents + params.detuneCents;
+            fluid_synth_set_gen (instance.synth, channel, GEN_FINETUNE, totalCents);
 
-        fluid_synth_set_gen (instance.synth, channel, GEN_FILTERFC, xg::cutoffOffsetToCents (params.filterCutoff));
-        fluid_synth_set_gen (instance.synth, channel, GEN_FILTERQ, xg::resonanceOffsetToCentibels (params.filterResonance));
-        const auto attackOfs = xg::attackOffsetToTimecents (params.egAttack);
-        fluid_synth_set_gen (instance.synth, channel, GEN_VOLENVATTACK, attackOfs);
-        fluid_synth_set_gen (instance.synth, channel, GEN_MODENVATTACK, attackOfs);
-        const auto decayOfs = xg::decayOffsetToTimecents (params.egDecay);
-        fluid_synth_set_gen (instance.synth, channel, GEN_VOLENVDECAY, decayOfs);
-        fluid_synth_set_gen (instance.synth, channel, GEN_MODENVDECAY, decayOfs);
-        const auto releaseOfs = xg::releaseOffsetToTimecents (params.egRelease);
-        fluid_synth_set_gen (instance.synth, channel, GEN_VOLENVRELEASE, releaseOfs);
-        fluid_synth_set_gen (instance.synth, channel, GEN_MODENVRELEASE, releaseOfs);
-        fluid_synth_set_gen (instance.synth, channel, GEN_VIBLFOFREQ, xg::vibratoRateOffsetToCents (params.vibratoRate));
-        fluid_synth_set_gen (instance.synth, channel, GEN_VIBLFOTOPITCH, xg::vibratoDepthOffsetToCents (params.vibratoDepth));
-        fluid_synth_set_gen (instance.synth, channel, GEN_VIBLFODELAY, xg::vibratoDelayOffsetToTimecents (params.vibratoDelay));
+            fluid_synth_set_gen (instance.synth, channel, GEN_FILTERFC, xg::cutoffOffsetToCents (params.filterCutoff));
+            fluid_synth_set_gen (instance.synth, channel, GEN_FILTERQ, xg::resonanceOffsetToCentibels (params.filterResonance));
+            const auto attackOfs = xg::attackOffsetToTimecents (params.egAttack);
+            fluid_synth_set_gen (instance.synth, channel, GEN_VOLENVATTACK, attackOfs);
+            fluid_synth_set_gen (instance.synth, channel, GEN_MODENVATTACK, attackOfs);
+            const auto decayOfs = xg::decayOffsetToTimecents (params.egDecay);
+            fluid_synth_set_gen (instance.synth, channel, GEN_VOLENVDECAY, decayOfs);
+            fluid_synth_set_gen (instance.synth, channel, GEN_MODENVDECAY, decayOfs);
+            const auto releaseOfs = xg::releaseOffsetToTimecents (params.egRelease);
+            fluid_synth_set_gen (instance.synth, channel, GEN_VOLENVRELEASE, releaseOfs);
+            fluid_synth_set_gen (instance.synth, channel, GEN_MODENVRELEASE, releaseOfs);
+            fluid_synth_set_gen (instance.synth, channel, GEN_VIBLFOFREQ, xg::vibratoRateOffsetToCents (params.vibratoRate));
+            fluid_synth_set_gen (instance.synth, channel, GEN_VIBLFOTOPITCH, xg::vibratoDepthOffsetToCents (params.vibratoDepth));
+            fluid_synth_set_gen (instance.synth, channel, GEN_VIBLFODELAY, xg::vibratoDelayOffsetToTimecents (params.vibratoDelay));
+        }
     }
 }
 
@@ -467,6 +526,8 @@ FluidSynthEngine::ChannelState FluidSynthEngine::getChannelState (int channel) c
     const auto msb = channelBankMsb[index].load (std::memory_order_acquire);
     const auto lsb = channelBankLsb[index].load (std::memory_order_acquire);
     const auto partMode = static_cast<xg::PartMode> (partModeRaw);
+    const auto gsPartModeRaw = channelGsPartMode[index].load (std::memory_order_acquire);
+    const auto gsPart = static_cast<gs::PartMode> (gsPartModeRaw);
 
     state.volume = channelVolume[index].load (std::memory_order_acquire);
     state.pan = channelPan[index].load (std::memory_order_acquire);
@@ -475,7 +536,13 @@ FluidSynthEngine::ChannelState FluidSynthEngine::getChannelState (int channel) c
     state.bankLsb = lsb;
     state.program = channelProgram[index].load (std::memory_order_acquire);
     state.partMode = partMode;
-    state.isDrum = xg::isDrumMode (partMode) || msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit;
+    state.gsPartMode = gsPart;
+
+    if (getActiveMode() == ActiveMode::GS)
+        state.isDrum = gs::isDrumMode (gsPart);
+    else
+        state.isDrum = xg::isDrumMode (partMode) || msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit;
+
     return state;
 }
 
@@ -563,14 +630,66 @@ void FluidSynthEngine::setChannelProgram (int channel, int value) noexcept
                                                               std::memory_order_release);
 }
 
+FluidSynthEngine::EngineMode FluidSynthEngine::getEngineMode() const noexcept
+{
+    return configuredEngineMode.load (std::memory_order_acquire);
+}
+
+void FluidSynthEngine::setEngineMode (EngineMode mode) noexcept
+{
+    configuredEngineMode.store (mode, std::memory_order_release);
+    if (mode == EngineMode::GM)
+    {
+        currentActiveMode.store (ActiveMode::GM, std::memory_order_release);
+        isXgModeActive.store (false, std::memory_order_release);
+    }
+    else if (mode == EngineMode::GS)
+    {
+        currentActiveMode.store (ActiveMode::GS, std::memory_order_release);
+        isXgModeActive.store (false, std::memory_order_release);
+    }
+    else if (mode == EngineMode::XG)
+    {
+        currentActiveMode.store (ActiveMode::XG, std::memory_order_release);
+        isXgModeActive.store (true, std::memory_order_release);
+    }
+}
+
+FluidSynthEngine::ActiveMode FluidSynthEngine::getActiveMode() const noexcept
+{
+    const auto conf = configuredEngineMode.load (std::memory_order_acquire);
+    if (conf != EngineMode::Auto)
+        return (conf == EngineMode::GS) ? ActiveMode::GS : ((conf == EngineMode::XG) ? ActiveMode::XG : ActiveMode::GM);
+
+    return currentActiveMode.load (std::memory_order_acquire);
+}
+
 bool FluidSynthEngine::isXgMode() const noexcept
 {
-    return isXgModeActive.load (std::memory_order_acquire);
+    return getActiveMode() == ActiveMode::XG;
 }
 
 void FluidSynthEngine::setXgMode (bool enabled) noexcept
 {
-    isXgModeActive.store (enabled, std::memory_order_release);
+    setEngineMode (enabled ? EngineMode::XG : EngineMode::GM);
+}
+
+bool FluidSynthEngine::isGsMode() const noexcept
+{
+    return getActiveMode() == ActiveMode::GS;
+}
+
+const gs::PartParameters& FluidSynthEngine::getGsPartParameters (int channel) const noexcept
+{
+    static const gs::PartParameters fallbackPart;
+    if (juce::isPositiveAndBelow (channel, numMidiChannels))
+        return gsPartParameters[static_cast<size_t> (channel)];
+    return fallbackPart;
+}
+
+const gs::DrumSetup& FluidSynthEngine::getGsDrumSetup (int setupIndex) const noexcept
+{
+    return (setupIndex == 2) ? gsDrumSetup2 : gsDrumSetup1;
 }
 
 void FluidSynthEngine::setMasterGain (float gain) noexcept
@@ -589,7 +708,8 @@ void FluidSynthEngine::updateMasterVolume() noexcept
     if (activeSynth != nullptr)
     {
         const auto baseGain = masterGain.load (std::memory_order_acquire);
-        const auto volRatio = static_cast<float> (systemParameters.masterVolume) / 127.0f;
+        const auto masterVol = (getActiveMode() == ActiveMode::GS) ? gsSystemParameters.masterVolume : systemParameters.masterVolume;
+        const auto volRatio = static_cast<float> (masterVol) / 127.0f;
         const auto desiredMasterGain = baseGain * volRatio;
         fluid_synth_set_gain (activeSynth->synth, desiredMasterGain);
         appliedMasterGain = desiredMasterGain;
@@ -602,7 +722,15 @@ void FluidSynthEngine::updateChannelTuning (int channel) noexcept
         return;
 
     const auto index = static_cast<size_t> (channel);
-    const auto totalCents = systemParameters.masterTuneCents + partParameters[index].detuneCents;
+    float totalCents = 0.0f;
+    if (getActiveMode() == ActiveMode::GS)
+    {
+        totalCents = gsSystemParameters.masterTuneCents + gsPartParameters[index].pitchOffsetFineCents;
+    }
+    else
+    {
+        totalCents = systemParameters.masterTuneCents + partParameters[index].detuneCents;
+    }
     fluid_synth_set_gen (activeSynth->synth, channel, GEN_FINETUNE, totalCents);
 }
 
@@ -650,6 +778,82 @@ void FluidSynthEngine::updateReverbSettings() noexcept
     fluid_synth_set_reverb (activeSynth->synth, roomsize, damping, width, level);
 }
 
+void FluidSynthEngine::updateGsReverbSettings() noexcept
+{
+    if (activeSynth == nullptr)
+        return;
+
+    fluid_synth_set_reverb_on (activeSynth->synth, 1);
+
+    double baseRoom = 0.6;
+    double baseDamp = 0.4;
+    switch (gsReverbParameters.macro)
+    {
+        case 0: baseRoom = 0.25; baseDamp = 0.6; break; // Room 1
+        case 1: baseRoom = 0.35; baseDamp = 0.5; break; // Room 2
+        case 2: baseRoom = 0.45; baseDamp = 0.5; break; // Room 3
+        case 3: baseRoom = 0.65; baseDamp = 0.4; break; // Hall 1
+        case 4: baseRoom = 0.80; baseDamp = 0.3; break; // Hall 2
+        case 5: baseRoom = 0.50; baseDamp = 0.1; break; // Plate
+        case 6: baseRoom = 0.70; baseDamp = 0.2; break; // Delay
+        case 7: baseRoom = 0.70; baseDamp = 0.2; break; // Pan Delay
+        default: break;
+    }
+
+    const auto timeFactor = static_cast<double> (juce::jlimit (0, 127, static_cast<int> (gsReverbParameters.time))) / 64.0;
+    const auto roomsize = juce::jlimit (0.0, 1.0, baseRoom * timeFactor);
+    const auto damping = juce::jlimit (0.0, 1.0, baseDamp + (static_cast<double> (gsReverbParameters.character) / 14.0));
+    const auto level = juce::jlimit (0.0, 1.0, static_cast<double> (gsReverbParameters.level) / 127.0);
+    const auto width = 1.0;
+
+    fluid_synth_set_reverb (activeSynth->synth, roomsize, damping, width, level);
+}
+
+void FluidSynthEngine::updateGsChorusSettings() noexcept
+{
+    if (activeSynth == nullptr)
+        return;
+
+    if (gsChorusParameters.level == 0)
+    {
+        fluid_synth_set_chorus_on (activeSynth->synth, 0);
+        return;
+    }
+
+    fluid_synth_set_chorus_on (activeSynth->synth, 1);
+
+    int nr = 2;
+    double speed = 1.0;
+    double depth_ms = 0.08;
+    int type = 0;
+
+    switch (gsChorusParameters.macro)
+    {
+        case 0: nr = 2; speed = 0.80; depth_ms = 0.05; type = 0; break; // Chorus 1 (Subtle / Clean)
+        case 1: nr = 2; speed = 0.90; depth_ms = 0.07; type = 0; break; // Chorus 2
+        case 2: nr = 2; speed = 1.00; depth_ms = 0.08; type = 0; break; // Chorus 3 (Default)
+        case 3: nr = 3; speed = 1.20; depth_ms = 0.10; type = 0; break; // Chorus 4 (Rich)
+        case 4: nr = 2; speed = 0.90; depth_ms = 0.07; type = 0; break; // FB Chorus
+        case 5: nr = 2; speed = 0.50; depth_ms = 0.12; type = 1; break; // Flanger
+        case 6: nr = 1; speed = 0.30; depth_ms = 0.02; type = 0; break; // Short Delay
+        case 7: nr = 1; speed = 0.30; depth_ms = 0.02; type = 0; break; // Short Delay FB
+        default: break;
+    }
+
+    if (gsChorusParameters.rate > 0)
+    {
+        const auto speedNorm = static_cast<double> (gsChorusParameters.rate) / 127.0;
+        speed = juce::jlimit (0.6, 2.0, 0.6 + speedNorm * 1.4);
+    }
+    if (gsChorusParameters.depth > 0)
+    {
+        depth_ms = juce::jlimit (0.01, 0.15, (static_cast<double> (gsChorusParameters.depth) / 127.0) * 0.12);
+    }
+
+    const auto level = juce::jlimit (0.0, 0.25, static_cast<double> (gsChorusParameters.level) / 127.0 * 0.20);
+    fluid_synth_set_chorus (activeSynth->synth, nr, level, speed, depth_ms, type);
+}
+
 void FluidSynthEngine::updateChorusSettings() noexcept
 {
     if (activeSynth == nullptr)
@@ -663,13 +867,13 @@ void FluidSynthEngine::updateChorusSettings() noexcept
 
     fluid_synth_set_chorus_on (activeSynth->synth, 1);
 
-    const auto nr = (chorusParameters.typeMsb >= 0x48) ? 4 : 3;
-    const auto level = juce::jlimit (0.0, 1.5, static_cast<double> (chorusParameters.chorusReturn) / 64.0 * 0.6);
+    const auto nr = (chorusParameters.typeMsb >= 0x48) ? 3 : 2;
+    const auto level = juce::jlimit (0.0, 1.0, static_cast<double> (chorusParameters.chorusReturn) / 64.0 * 0.35);
     const auto speedParam = chorusParameters.parameters[0] > 0 ? chorusParameters.parameters[0] : 64;
     const auto speedNorm = static_cast<double> (speedParam) / 127.0;
-    const auto speed = juce::jlimit (0.1, 2.0, 0.1 + std::pow (speedNorm, 2.0) * 0.9);
+    const auto speed = juce::jlimit (0.1, 2.0, 0.15 + std::pow (speedNorm, 2.0) * 0.9);
     const auto depthParam = chorusParameters.parameters[1] > 0 ? chorusParameters.parameters[1] : 64;
-    const auto depth_ms = juce::jlimit (0.0, 6.0, (static_cast<double> (depthParam) / 127.0) * 4.0);
+    const auto depth_ms = juce::jlimit (0.0, 0.8, (static_cast<double> (depthParam) / 127.0) * 0.6);
     const auto type = 0;
 
     fluid_synth_set_chorus (activeSynth->synth, nr, level, speed, depth_ms, type);
@@ -740,8 +944,12 @@ void FluidSynthEngine::resetChannelState (int channel) noexcept
         return;
 
     const auto index = static_cast<size_t> (channel);
-    const auto xgActive = isXgModeActive.load (std::memory_order_acquire);
-    channelVolume[index].store (xgActive ? xg::defaultVolume : 127, std::memory_order_release);
+    const auto activeMode = getActiveMode();
+    const auto xgActive = (activeMode == ActiveMode::XG);
+    const auto gsActive = (activeMode == ActiveMode::GS);
+    const auto defaultVol = (xgActive || gsActive) ? 100 : 127;
+
+    channelVolume[index].store (defaultVol, std::memory_order_release);
     channelPan[index].store (xg::defaultPan, std::memory_order_release);
 
     const auto isDrum = (channel == 9);
@@ -751,16 +959,318 @@ void FluidSynthEngine::resetChannelState (int channel) noexcept
     channelBankLsb[index].store (lsb, std::memory_order_release);
     channelBank[index].store ((msb << 7) | lsb, std::memory_order_release);
     channelPartMode[index].store (static_cast<uint8_t> (isDrum ? xg::PartMode::Drum : xg::PartMode::Normal), std::memory_order_release);
+    channelGsPartMode[index].store (static_cast<uint8_t> (isDrum ? gs::PartMode::Drum1 : gs::PartMode::Normal), std::memory_order_release);
     drumPartProtectMode[index].store (isDrum, std::memory_order_release);
     channelProgram[index].store (0, std::memory_order_release);
 
     partParameters[index].reset();
+    gsPartParameters[index].reset (channel);
     nrpnStates[index].reset();
     for (size_t n = 0; n < 128; ++n)
         activeNoteTransposition[index][n] = static_cast<uint8_t> (n);
     activeGroupNote[index].fill (-1);
     resetAllGenerators (channel);
     updateChannelTuning (channel);
+
+    if (activeSynth != nullptr)
+    {
+        fluid_synth_cc (activeSynth->synth, channel, 121, 0); // Reset All Controllers
+        fluid_synth_cc (activeSynth->synth, channel, 1, 0);   // Modulation Wheel = 0
+        fluid_synth_cc (activeSynth->synth, channel, 64, 0);  // Sustain = 0
+        fluid_synth_cc (activeSynth->synth, channel, 11, 127);// Expression = 127
+        fluid_synth_cc (activeSynth->synth, channel, 91, gsActive ? gs::defaultReverbSend : xg::defaultReverbSend);
+        fluid_synth_cc (activeSynth->synth, channel, 93, gsActive ? gs::defaultChorusSend : xg::defaultChorusSend);
+        fluid_synth_pitch_bend (activeSynth->synth, channel, 8192);
+    }
+}
+
+void FluidSynthEngine::resetGsState() noexcept
+{
+    gsSystemParameters.reset();
+    for (int channel = 0; channel < numMidiChannels; ++channel)
+        gsPartParameters[static_cast<size_t> (channel)].reset (channel);
+    gsDrumSetup1.reset();
+    gsDrumSetup2.reset();
+    gsReverbParameters.reset();
+    gsChorusParameters.reset();
+    gsDelayParameters.reset();
+
+    for (int channel = 0; channel < numMidiChannels; ++channel)
+        resetChannelState (channel);
+
+    if (activeSynth != nullptr)
+    {
+        for (int channel = 0; channel < numMidiChannels; ++channel)
+        {
+            const auto partMode = static_cast<gs::PartMode> (channelGsPartMode[static_cast<size_t> (channel)].load (std::memory_order_acquire));
+            fluid_synth_set_channel_type (activeSynth->synth, channel, gs::isDrumMode (partMode) ? CHANNEL_TYPE_DRUM : CHANNEL_TYPE_MELODIC);
+        }
+    }
+
+    channelStateNeedsApply = true;
+    updateMasterVolume();
+    updateAllChannelTunings();
+    updateGsReverbSettings();
+    updateGsChorusSettings();
+}
+
+void FluidSynthEngine::handleGsSysEx (const juce::uint8* data, int numBytes) noexcept
+{
+    if (data == nullptr || numBytes < 8)
+        return;
+
+    // Checksum verification
+    int sum = 0;
+    for (int i = 4; i < numBytes - 1; ++i)
+        sum += data[i];
+    const auto expectedChecksum = static_cast<uint8_t> ((128 - (sum % 128)) & 0x7F);
+    if (data[numBytes - 1] != expectedChecksum)
+        return;
+
+    const auto addrHigh = data[4];
+    const auto addrMid  = data[5];
+    const auto addrLow  = data[6];
+    const auto numData  = numBytes - 8;
+    const auto* dataPtr = data + 7;
+
+    if (numData <= 0)
+        return;
+
+    // 1. System Parameters (40 00 aa or 00 00 7F)
+    if ((addrHigh == 0x40 || addrHigh == 0x00) && addrMid == 0x00)
+    {
+        if (addrLow == 0x7F && numData >= 1 && dataPtr[0] == 0x00)
+        {
+            // GS Reset (Standard 40 00 7F 00 or System Mode Set 00 00 7F 00)
+            if (configuredEngineMode.load (std::memory_order_acquire) == EngineMode::Auto)
+            {
+                currentActiveMode.store (ActiveMode::GS, std::memory_order_release);
+                isXgModeActive.store (false, std::memory_order_release);
+            }
+            resetGsState();
+            return;
+        }
+
+        for (int i = 0; i < numData; ++i)
+        {
+            const auto curAddr = addrLow + i;
+            const auto val = dataPtr[i];
+            if (curAddr >= 0x00 && curAddr <= 0x03)
+            {
+                gsSystemParameters.masterTuneRaw[static_cast<size_t> (curAddr)] = val & 0x0F;
+                gsSystemParameters.updateMasterTuneFromRaw();
+            }
+            else if (curAddr == 0x04)
+            {
+                gsSystemParameters.masterVolume = val & 0x7F;
+            }
+            else if (curAddr == 0x05)
+            {
+                gsSystemParameters.masterKeyShift = val & 0x7F;
+            }
+            else if (curAddr == 0x06)
+            {
+                gsSystemParameters.masterPan = val & 0x7F;
+            }
+        }
+
+        updateMasterVolume();
+        updateAllChannelTunings();
+        return;
+    }
+
+    // 2. Reverb Parameters (40 01 30..35)
+    if (addrHigh == 0x40 && addrMid == 0x01 && addrLow >= 0x30 && addrLow <= 0x35)
+    {
+        for (int i = 0; i < numData; ++i)
+        {
+            const auto curAddr = addrLow + i;
+            const auto val = dataPtr[i];
+            switch (curAddr)
+            {
+                case 0x30: gsReverbParameters.macro = val & 0x07; break;
+                case 0x31: gsReverbParameters.character = val & 0x07; break;
+                case 0x32: gsReverbParameters.preLpf = val & 0x07; break;
+                case 0x33: gsReverbParameters.level = val & 0x7F; break;
+                case 0x34: gsReverbParameters.time = val & 0x7F; break;
+                case 0x35: gsReverbParameters.delayFeedback = val & 0x7F; break;
+                default: break;
+            }
+        }
+        updateGsReverbSettings();
+        return;
+    }
+
+    // 3. Chorus Parameters (40 01 38..40)
+    if (addrHigh == 0x40 && addrMid == 0x01 && addrLow >= 0x38 && addrLow <= 0x40)
+    {
+        for (int i = 0; i < numData; ++i)
+        {
+            const auto curAddr = addrLow + i;
+            const auto val = dataPtr[i];
+            switch (curAddr)
+            {
+                case 0x38: gsChorusParameters.macro = val & 0x07; break;
+                case 0x39: gsChorusParameters.preLpf = val & 0x07; break;
+                case 0x3A: gsChorusParameters.level = val & 0x7F; break;
+                case 0x3B: gsChorusParameters.feedback = val & 0x7F; break;
+                case 0x3C: gsChorusParameters.delay = val & 0x7F; break;
+                case 0x3D: gsChorusParameters.rate = val & 0x7F; break;
+                case 0x3E: gsChorusParameters.depth = val & 0x7F; break;
+                case 0x3F: gsChorusParameters.sendToReverb = val & 0x7F; break;
+                case 0x40: gsChorusParameters.sendToDelay = val & 0x7F; break;
+                default: break;
+            }
+        }
+        updateGsChorusSettings();
+        return;
+    }
+
+    // 4. Delay Parameters (40 01 50..59)
+    if (addrHigh == 0x40 && addrMid == 0x01 && addrLow >= 0x50 && addrLow <= 0x59)
+    {
+        for (int i = 0; i < numData; ++i)
+        {
+            const auto curAddr = addrLow + i;
+            const auto val = dataPtr[i];
+            switch (curAddr)
+            {
+                case 0x50: gsDelayParameters.macro = val & 0x0F; break;
+                case 0x51: gsDelayParameters.preLpf = val & 0x07; break;
+                case 0x52: gsDelayParameters.timeCenter = val & 0x7F; break;
+                case 0x53: gsDelayParameters.feedback = val & 0x7F; break;
+                case 0x58: gsDelayParameters.level = val & 0x7F; break;
+                case 0x59: gsDelayParameters.sendToReverb = val & 0x7F; break;
+                default: break;
+            }
+        }
+        return;
+    }
+
+    // 5. Part Parameters (40 1x aa)
+    if (addrHigh == 0x40 && addrMid >= 0x10 && addrMid <= 0x1F)
+    {
+        const auto channel = gs::blockToChannel (addrMid);
+        if (channel >= 0 && channel < numMidiChannels)
+        {
+            const auto index = static_cast<size_t> (channel);
+            auto& part = gsPartParameters[index];
+
+            for (int i = 0; i < numData; ++i)
+            {
+                const auto curAddr = addrLow + i;
+                const auto val = dataPtr[i];
+
+                switch (curAddr)
+                {
+                    case 0x00:
+                        part.variationBank = val & 0x7F;
+                        channelBankMsb[index].store (val & 0x7F, std::memory_order_release);
+                        break;
+                    case 0x01:
+                        part.toneNumber = val & 0x7F;
+                        channelProgram[index].store (val & 0x7F, std::memory_order_release);
+                        if (activeSynth != nullptr)
+                            handleProgramChange (channel, val & 0x7F);
+                        break;
+                    case 0x15:
+                    {
+                        const auto pMode = (val == 1) ? gs::PartMode::Drum1 : ((val == 2) ? gs::PartMode::Drum2 : gs::PartMode::Normal);
+                        part.partMode = pMode;
+                        channelGsPartMode[index].store (static_cast<uint8_t> (pMode), std::memory_order_release);
+                        if (activeSynth != nullptr)
+                            fluid_synth_set_channel_type (activeSynth->synth, channel, gs::isDrumMode (pMode) ? CHANNEL_TYPE_DRUM : CHANNEL_TYPE_MELODIC);
+                        channelStateNeedsApply = true;
+                        break;
+                    }
+                    case 0x16:
+                        part.keyShift = val & 0x7F;
+                        break;
+                    case 0x17:
+                        part.pitchOffsetFineRaw[0] = val & 0x7F;
+                        part.updatePitchOffsetFine();
+                        updateChannelTuning (channel);
+                        break;
+                    case 0x18:
+                        part.pitchOffsetFineRaw[1] = val & 0x7F;
+                        part.updatePitchOffsetFine();
+                        updateChannelTuning (channel);
+                        break;
+                    case 0x19:
+                        part.level = val & 0x7F;
+                        channelVolume[index].store (val & 0x7F, std::memory_order_release);
+                        if (activeSynth != nullptr)
+                            fluid_synth_cc (activeSynth->synth, channel, 7, val & 0x7F);
+                        break;
+                    case 0x1C:
+                        part.pan = val & 0x7F;
+                        channelPan[index].store (val & 0x7F, std::memory_order_release);
+                        if (activeSynth != nullptr)
+                            fluid_synth_cc (activeSynth->synth, channel, 10, val & 0x7F);
+                        break;
+                    case 0x21:
+                        part.chorusSend = val & 0x7F;
+                        if (activeSynth != nullptr)
+                            fluid_synth_cc (activeSynth->synth, channel, 93, val & 0x7F);
+                        break;
+                    case 0x22:
+                        part.reverbSend = val & 0x7F;
+                        if (activeSynth != nullptr)
+                            fluid_synth_cc (activeSynth->synth, channel, 91, val & 0x7F);
+                        break;
+                    case 0x23:
+                        part.delaySend = val & 0x7F;
+                        break;
+                    case 0x26:
+                        part.toneMap = val & 0x7F;
+                        channelBankLsb[index].store (val & 0x7F, std::memory_order_release);
+                        break;
+                    default:
+                        if (curAddr >= 0x40 && curAddr <= 0x4B)
+                        {
+                            part.scaleTuning[static_cast<size_t> (curAddr - 0x40)] = static_cast<int8_t> (static_cast<int> (val) - 64);
+                            updateChannelTuning (channel);
+                        }
+                        break;
+                }
+            }
+        }
+        return;
+    }
+
+    // 6. Drum Setup (40 2x aa / 40 3x aa)
+    if (addrHigh == 0x40 && (addrMid >= 0x20 && addrMid <= 0x38))
+    {
+        const auto mapIndex = (addrMid < 0x30) ? 1 : 2;
+        auto& setup = (mapIndex == 1) ? gsDrumSetup1 : gsDrumSetup2;
+        const auto paramType = addrMid & 0x0F;
+
+        for (int i = 0; i < numData; ++i)
+        {
+            const auto noteNum = addrLow + i;
+            if (noteNum >= 0 && noteNum < 128)
+            {
+                auto& note = setup.notes[static_cast<size_t> (noteNum)];
+                note.modified = true;
+                const auto val = dataPtr[i] & 0x7F;
+
+                switch (paramType)
+                {
+                    case 0: note.pitch = val; break;
+                    case 1: note.level = val; break;
+                    case 2: note.alternateGroup = val; break;
+                    case 3: note.pan = val; break;
+                    case 4: note.reverbSend = val; break;
+                    case 5: note.chorusSend = val; break;
+                    case 6: note.delaySend = val; break;
+                    case 7: note.rcvNoteOff = val; break;
+                    case 8: note.rcvNoteOn = val; break;
+                    default: break;
+                }
+            }
+        }
+        return;
+    }
 }
 
 void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexcept
@@ -773,28 +1283,40 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
         && data[2] == 0x09
         && (data[3] == 0x01 || data[3] == 0x03);
 
-    const auto isGsReset = numBytes >= 9
+    const auto isGs = numBytes >= 8
         && data[0] == 0x41
         && data[2] == 0x42
-        && data[3] == 0x12
-        && data[4] == 0x40
-        && data[5] == 0x00
-        && data[6] == 0x7f
-        && data[7] == 0x00;
+        && data[3] == 0x12;
 
     const auto isXg = numBytes >= 7
         && data[0] == 0x43
         && (data[1] & 0xf0) == 0x10
         && data[2] == 0x4c;
 
-    if (isGmReset || isGsReset)
+    if (isGs)
     {
-        isXgModeActive.store (false, std::memory_order_release);
+        handleGsSysEx (data, numBytes);
+        return;
+    }
+
+    if (isGmReset)
+    {
+        if (configuredEngineMode.load (std::memory_order_acquire) == EngineMode::Auto)
+        {
+            currentActiveMode.store (ActiveMode::GM, std::memory_order_release);
+            isXgModeActive.store (false, std::memory_order_release);
+        }
         systemParameters.reset();
+        gsSystemParameters.reset();
         drumSetup1.reset();
         drumSetup2.reset();
+        gsDrumSetup1.reset();
+        gsDrumSetup2.reset();
         reverbParameters.reset();
         chorusParameters.reset();
+        gsReverbParameters.reset();
+        gsChorusParameters.reset();
+        gsDelayParameters.reset();
         variationParameters.reset();
         multiEqParameters.reset();
         multiEqFiltersNeedUpdate = true;
@@ -850,7 +1372,11 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
         if (addrLow == 0x7e && numData >= 1 && dataPtr[0] == 0x00)
         {
             // XG System On
-            isXgModeActive.store (true, std::memory_order_release);
+            if (configuredEngineMode.load (std::memory_order_acquire) == EngineMode::Auto)
+            {
+                currentActiveMode.store (ActiveMode::XG, std::memory_order_release);
+                isXgModeActive.store (true, std::memory_order_release);
+            }
             systemParameters.reset();
             drumSetup1.reset();
             drumSetup2.reset();
@@ -1497,13 +2023,18 @@ void FluidSynthEngine::handleProgramChange (int channel, int program) noexcept
 
     const auto index = static_cast<size_t> (channel);
     const auto requestedBank = channelBank[index].load (std::memory_order_acquire);
-    const auto partModeRaw = channelPartMode[index].load (std::memory_order_acquire);
     const auto msb = channelBankMsb[index].load (std::memory_order_acquire);
+    const auto lsb = channelBankLsb[index].load (std::memory_order_acquire);
+    const auto activeMode = getActiveMode();
+    const auto gsMode = (activeMode == ActiveMode::GS);
+    const auto gsPart = static_cast<gs::PartMode> (channelGsPartMode[index].load (std::memory_order_acquire));
+    const auto partModeRaw = channelPartMode[index].load (std::memory_order_acquire);
     const auto partMode = static_cast<xg::PartMode> (partModeRaw);
-    const auto isPercussion = xg::isDrumMode (partMode) || msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit;
+    const auto isPercussion = gsMode ? gs::isDrumMode (gsPart)
+                                     : (xg::isDrumMode (partMode) || msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit);
 
     fluid_synth_set_channel_type (activeSynth->synth, channel, isPercussion ? CHANNEL_TYPE_DRUM : CHANNEL_TYPE_MELODIC);
-    applyProgramChangeToSynth (*activeSynth, channel, program, requestedBank, isPercussion);
+    applyProgramChangeToSynth (*activeSynth, channel, program, requestedBank, msb, lsb, activeMode, isPercussion);
 }
 
 const xg::PartParameters& FluidSynthEngine::getPartParameters (int channel) const noexcept
@@ -1632,8 +2163,16 @@ void FluidSynthEngine::setPartVibratoRate (int channel, int value) noexcept
     partParameters[static_cast<size_t> (channel)].vibratoRate = clamped;
     if (activeSynth != nullptr)
     {
-        fluid_synth_set_gen (activeSynth->synth, channel, GEN_VIBLFOFREQ,
-                             xg::vibratoRateOffsetToCents (clamped));
+        if (clamped == 64)
+        {
+            fluid_synth_set_gen (activeSynth->synth, channel, GEN_VIBLFOFREQ, 0.0f);
+        }
+        else
+        {
+            // Limit rate offset to ±384 cents to prevent ultra-slow pitch modulation warble
+            const auto rateOffset = juce::jlimit (-384.0f, 384.0f, static_cast<float> (clamped - 64) * 6.0f);
+            fluid_synth_set_gen (activeSynth->synth, channel, GEN_VIBLFOFREQ, rateOffset);
+        }
         fluid_synth_cc (activeSynth->synth, channel, 76, clamped);
     }
 }
@@ -1647,8 +2186,44 @@ void FluidSynthEngine::setPartVibratoDepth (int channel, int value) noexcept
     partParameters[static_cast<size_t> (channel)].vibratoDepth = clamped;
     if (activeSynth != nullptr)
     {
-        fluid_synth_set_gen (activeSynth->synth, channel, GEN_VIBLFOTOPITCH,
-                             xg::vibratoDepthOffsetToCents (clamped));
+        const auto depthCents = (clamped > 64) ? static_cast<float> (clamped - 64) * 2.0f : 0.0f;
+        fluid_synth_set_gen (activeSynth->synth, channel, GEN_VIBLFOTOPITCH, depthCents);
+
+        if (clamped == 0)
+        {
+            // When Vibrato Depth is explicitly 0, mute active voices immediately
+            std::array<fluid_voice_t*, 256> voiceBuf {};
+            fluid_synth_get_voicelist (activeSynth->synth, voiceBuf.data(), static_cast<int> (voiceBuf.size()), -1);
+            for (auto* v : voiceBuf)
+            {
+                if (v == nullptr)
+                    break;
+                if (fluid_voice_get_channel (v) == channel)
+                {
+                    fluid_voice_gen_set (v, GEN_VIBLFOTOPITCH, 0.0f);
+                    fluid_voice_update_param (v, GEN_VIBLFOTOPITCH);
+                }
+            }
+
+            // Mute CC#1 pitch modulation range to prevent unintended vibrato
+            fluid_synth_cc (activeSynth->synth, channel, 101, 0);
+            fluid_synth_cc (activeSynth->synth, channel, 100, 5);
+            fluid_synth_cc (activeSynth->synth, channel, 6, 0);
+            fluid_synth_cc (activeSynth->synth, channel, 38, 0);
+            fluid_synth_cc (activeSynth->synth, channel, 101, 127);
+            fluid_synth_cc (activeSynth->synth, channel, 100, 127);
+        }
+        else if (clamped == 64)
+        {
+            // Restore default 50 cents modulation depth range
+            fluid_synth_cc (activeSynth->synth, channel, 101, 0);
+            fluid_synth_cc (activeSynth->synth, channel, 100, 5);
+            fluid_synth_cc (activeSynth->synth, channel, 6, 0);
+            fluid_synth_cc (activeSynth->synth, channel, 38, 64);
+            fluid_synth_cc (activeSynth->synth, channel, 101, 127);
+            fluid_synth_cc (activeSynth->synth, channel, 100, 127);
+        }
+
         fluid_synth_cc (activeSynth->synth, channel, 77, clamped);
     }
 }
@@ -1895,6 +2470,64 @@ void FluidSynthEngine::applyDrumNoteGenerators (fluid_voice_t* v, const xg::Drum
     }
 }
 
+void FluidSynthEngine::applyGsDrumNoteGenerators (fluid_voice_t* v, const gs::DrumNoteParameters& noteParams) noexcept
+{
+    if (v == nullptr)
+        return;
+
+    if (noteParams.pitch != 64)
+    {
+        fluid_voice_gen_incr (v, GEN_COARSETUNE, static_cast<float> (noteParams.pitch - 64));
+        fluid_voice_update_param (v, GEN_COARSETUNE);
+    }
+    if (noteParams.pan > 0)
+    {
+        const auto panVal = ((static_cast<float> (noteParams.pan) - 64.0f) / 64.0f) * 500.0f;
+        fluid_voice_gen_set (v, GEN_PAN, panVal);
+        fluid_voice_update_param (v, GEN_PAN);
+    }
+    else if (noteParams.pan == 0)
+    {
+        const auto randPan = juce::Random::getSystemRandom().nextFloat() * 1000.0f - 500.0f;
+        fluid_voice_gen_set (v, GEN_PAN, randPan);
+        fluid_voice_update_param (v, GEN_PAN);
+    }
+    if (noteParams.reverbSend >= 0)
+    {
+        fluid_voice_gen_set (v, GEN_REVERBSEND, (static_cast<float> (noteParams.reverbSend) / 127.0f) * 1000.0f);
+        fluid_voice_update_param (v, GEN_REVERBSEND);
+    }
+    if (noteParams.chorusSend >= 0)
+    {
+        fluid_voice_gen_set (v, GEN_CHORUSSEND, (static_cast<float> (noteParams.chorusSend) / 127.0f) * 1000.0f);
+        fluid_voice_update_param (v, GEN_CHORUSSEND);
+    }
+}
+
+void FluidSynthEngine::applyMelodicVoiceGenerators (fluid_voice_t* v, int channel) noexcept
+{
+    if (v == nullptr || ! juce::isPositiveAndBelow (channel, numMidiChannels))
+        return;
+
+    const auto index = static_cast<size_t> (channel);
+    const auto& p = partParameters[index];
+
+    // If Vibrato Depth is 0, completely suppress preset vibrato from the SoundFont!
+    if (p.vibratoDepth == 0)
+    {
+        fluid_voice_gen_set (v, GEN_VIBLFOTOPITCH, 0.0f);
+        fluid_voice_update_param (v, GEN_VIBLFOTOPITCH);
+    }
+    else if (p.vibratoDepth < 64)
+    {
+        // Scale down preset vibrato depth
+        const auto scale = static_cast<float> (p.vibratoDepth) / 64.0f;
+        const auto curVal = fluid_voice_gen_get (v, GEN_VIBLFOTOPITCH);
+        fluid_voice_gen_set (v, GEN_VIBLFOTOPITCH, curVal * scale);
+        fluid_voice_update_param (v, GEN_VIBLFOTOPITCH);
+    }
+}
+
 void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noexcept
 {
     if (message.isSysEx())
@@ -1907,6 +2540,9 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
     if (! juce::isPositiveAndBelow (channel, numMidiChannels))
         return;
 
+    const auto activeMode = getActiveMode();
+    const auto gsMode = (activeMode == ActiveMode::GS);
+
     if (message.isNoteOn())
     {
         if (activeSynth != nullptr)
@@ -1917,75 +2553,163 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
             const auto partModeRaw = channelPartMode[index].load (std::memory_order_acquire);
             const auto msb = channelBankMsb[index].load (std::memory_order_acquire);
             const auto partMode = static_cast<xg::PartMode> (partModeRaw);
-            const auto isDrum = xg::isDrumMode (partMode) || msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit;
+            const auto gsPart = static_cast<gs::PartMode> (channelGsPartMode[index].load (std::memory_order_acquire));
+            const auto isDrum = gsMode ? gs::isDrumMode (gsPart)
+                                       : (xg::isDrumMode (partMode) || msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit);
             const auto& p = partParameters[index];
 
-            if (noteNumber < p.noteLimitLow || noteNumber > p.noteLimitHigh)
+            if (! gsMode && (noteNumber < p.noteLimitLow || noteNumber > p.noteLimitHigh))
                 return;
 
             if (isDrum && juce::isPositiveAndBelow (noteNumber, 128))
             {
-                const auto& setup = (partMode == xg::PartMode::Drums2 || partMode == xg::PartMode::Drums4)
-                                        ? drumSetup2 : drumSetup1;
-                const auto& noteParams = setup.notes[static_cast<size_t> (noteNumber)];
-
-                if (noteParams.modified)
+                if (gsMode)
                 {
-                    if (noteParams.rcvNoteOn == 0 || noteParams.level == 0)
-                        return;
+                    const auto& setup = (gsPart == gs::PartMode::Drum2) ? gsDrumSetup2 : gsDrumSetup1;
+                    const auto& noteParams = setup.notes[static_cast<size_t> (noteNumber)];
 
-                    if (noteParams.alternateGroup > 0 && noteParams.alternateGroup < 128)
+                    if (noteParams.modified)
                     {
-                        const auto prevNote = activeGroupNote[index][static_cast<size_t> (noteParams.alternateGroup)];
-                        if (prevNote >= 0 && prevNote != noteNumber)
-                            fluid_synth_noteoff (activeSynth->synth, channel, prevNote);
-                        activeGroupNote[index][static_cast<size_t> (noteParams.alternateGroup)] = noteNumber;
-                    }
+                        if (noteParams.rcvNoteOn == 0 || noteParams.level == 0)
+                            return;
 
-                    const auto scaledVel = juce::jlimit (1, 127, static_cast<int> (std::round (rawVelocity * (static_cast<float> (noteParams.level) / 127.0f))));
-
-                    std::array<fluid_voice_t*, 256> voiceBuf {};
-                    fluid_synth_get_voicelist (activeSynth->synth, voiceBuf.data(), static_cast<int> (voiceBuf.size()), -1);
-                    unsigned int maxIdBefore = 0;
-                    for (auto* v : voiceBuf)
-                    {
-                        if (v == nullptr)
-                            break;
-                        maxIdBefore = juce::jmax (maxIdBefore, fluid_voice_get_id (v));
-                    }
-
-                    fluid_synth_noteon (activeSynth->synth, channel, noteNumber, scaledVel);
-
-                    voiceBuf.fill (nullptr);
-                    fluid_synth_get_voicelist (activeSynth->synth, voiceBuf.data(), static_cast<int> (voiceBuf.size()), -1);
-                    for (auto* v : voiceBuf)
-                    {
-                        if (v == nullptr)
-                            break;
-                        if (fluid_voice_get_id (v) > maxIdBefore
-                            && fluid_voice_get_channel (v) == channel
-                            && fluid_voice_get_key (v) == noteNumber)
+                        if (noteParams.alternateGroup > 0 && noteParams.alternateGroup < 128)
                         {
-                            applyDrumNoteGenerators (v, noteParams);
+                            const auto prevNote = activeGroupNote[index][static_cast<size_t> (noteParams.alternateGroup)];
+                            if (prevNote >= 0 && prevNote != noteNumber)
+                                fluid_synth_noteoff (activeSynth->synth, channel, prevNote);
+                            activeGroupNote[index][static_cast<size_t> (noteParams.alternateGroup)] = noteNumber;
                         }
+
+                        const auto scaledVel = juce::jlimit (1, 127, static_cast<int> (std::round (rawVelocity * (static_cast<float> (noteParams.level) / 127.0f))));
+
+                        std::array<fluid_voice_t*, 256> voiceBuf {};
+                        fluid_synth_get_voicelist (activeSynth->synth, voiceBuf.data(), static_cast<int> (voiceBuf.size()), -1);
+                        unsigned int maxIdBefore = 0;
+                        for (auto* v : voiceBuf)
+                        {
+                            if (v == nullptr)
+                                break;
+                            maxIdBefore = juce::jmax (maxIdBefore, fluid_voice_get_id (v));
+                        }
+
+                        fluid_synth_noteon (activeSynth->synth, channel, noteNumber, scaledVel);
+
+                        voiceBuf.fill (nullptr);
+                        fluid_synth_get_voicelist (activeSynth->synth, voiceBuf.data(), static_cast<int> (voiceBuf.size()), -1);
+                        for (auto* v : voiceBuf)
+                        {
+                            if (v == nullptr)
+                                break;
+                            if (fluid_voice_get_id (v) > maxIdBefore
+                                && fluid_voice_get_channel (v) == channel
+                                && fluid_voice_get_key (v) == noteNumber)
+                            {
+                                applyGsDrumNoteGenerators (v, noteParams);
+                            }
+                        }
+                        return;
                     }
-                    return;
+                }
+                else
+                {
+                    const auto& setup = (partMode == xg::PartMode::Drums2 || partMode == xg::PartMode::Drums4)
+                                            ? drumSetup2 : drumSetup1;
+                    const auto& noteParams = setup.notes[static_cast<size_t> (noteNumber)];
+
+                    if (noteParams.modified)
+                    {
+                        if (noteParams.rcvNoteOn == 0 || noteParams.level == 0)
+                            return;
+
+                        if (noteParams.alternateGroup > 0 && noteParams.alternateGroup < 128)
+                        {
+                            const auto prevNote = activeGroupNote[index][static_cast<size_t> (noteParams.alternateGroup)];
+                            if (prevNote >= 0 && prevNote != noteNumber)
+                                fluid_synth_noteoff (activeSynth->synth, channel, prevNote);
+                            activeGroupNote[index][static_cast<size_t> (noteParams.alternateGroup)] = noteNumber;
+                        }
+
+                        const auto scaledVel = juce::jlimit (1, 127, static_cast<int> (std::round (rawVelocity * (static_cast<float> (noteParams.level) / 127.0f))));
+
+                        std::array<fluid_voice_t*, 256> voiceBuf {};
+                        fluid_synth_get_voicelist (activeSynth->synth, voiceBuf.data(), static_cast<int> (voiceBuf.size()), -1);
+                        unsigned int maxIdBefore = 0;
+                        for (auto* v : voiceBuf)
+                        {
+                            if (v == nullptr)
+                                break;
+                            maxIdBefore = juce::jmax (maxIdBefore, fluid_voice_get_id (v));
+                        }
+
+                        fluid_synth_noteon (activeSynth->synth, channel, noteNumber, scaledVel);
+
+                        voiceBuf.fill (nullptr);
+                        fluid_synth_get_voicelist (activeSynth->synth, voiceBuf.data(), static_cast<int> (voiceBuf.size()), -1);
+                        for (auto* v : voiceBuf)
+                        {
+                            if (v == nullptr)
+                                break;
+                            if (fluid_voice_get_id (v) > maxIdBefore
+                                && fluid_voice_get_channel (v) == channel
+                                && fluid_voice_get_key (v) == noteNumber)
+                            {
+                                applyDrumNoteGenerators (v, noteParams);
+                            }
+                        }
+                        return;
+                    }
                 }
 
                 fluid_synth_noteon (activeSynth->synth, channel, noteNumber, rawVelocity);
                 return;
             }
 
-            const auto transpose = systemParameters.transpose - 64;
-            const auto shift = p.noteShift - 64;
-            const auto effectiveNote = juce::jlimit (0, 127, noteNumber + transpose + shift);
+            int effectiveNote = noteNumber;
+            if (gsMode)
+            {
+                const auto transpose = gsSystemParameters.masterKeyShift - 64;
+                const auto shift = gsPartParameters[index].keyShift - 64;
+                effectiveNote = juce::jlimit (0, 127, noteNumber + transpose + shift);
+            }
+            else
+            {
+                const auto transpose = systemParameters.transpose - 64;
+                const auto shift = p.noteShift - 64;
+                effectiveNote = juce::jlimit (0, 127, noteNumber + transpose + shift);
+
+                if (p.monoPolyMode == 0)
+                    fluid_synth_all_notes_off (activeSynth->synth, channel);
+            }
+
             if (juce::isPositiveAndBelow (noteNumber, 128))
                 activeNoteTransposition[index][static_cast<size_t> (noteNumber)] = static_cast<uint8_t> (effectiveNote);
 
-            if (p.monoPolyMode == 0)
-                fluid_synth_all_notes_off (activeSynth->synth, channel);
+            std::array<fluid_voice_t*, 256> voiceBuf {};
+            fluid_synth_get_voicelist (activeSynth->synth, voiceBuf.data(), static_cast<int> (voiceBuf.size()), -1);
+            unsigned int maxIdBefore = 0;
+            for (auto* v : voiceBuf)
+            {
+                if (v == nullptr)
+                    break;
+                maxIdBefore = juce::jmax (maxIdBefore, fluid_voice_get_id (v));
+            }
 
             fluid_synth_noteon (activeSynth->synth, channel, effectiveNote, rawVelocity);
+
+            voiceBuf.fill (nullptr);
+            fluid_synth_get_voicelist (activeSynth->synth, voiceBuf.data(), static_cast<int> (voiceBuf.size()), -1);
+            for (auto* v : voiceBuf)
+            {
+                if (v == nullptr)
+                    break;
+                if (fluid_voice_get_id (v) > maxIdBefore
+                    && fluid_voice_get_channel (v) == channel
+                    && fluid_voice_get_key (v) == effectiveNote)
+                {
+                    applyMelodicVoiceGenerators (v, channel);
+                }
+            }
         }
     }
     else if (message.isNoteOff())
@@ -1997,21 +2721,40 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
             const auto partModeRaw = channelPartMode[index].load (std::memory_order_acquire);
             const auto msb = channelBankMsb[index].load (std::memory_order_acquire);
             const auto partMode = static_cast<xg::PartMode> (partModeRaw);
-            const auto isDrum = xg::isDrumMode (partMode) || msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit;
+            const auto gsPart = static_cast<gs::PartMode> (channelGsPartMode[index].load (std::memory_order_acquire));
+            const auto isDrum = gsMode ? gs::isDrumMode (gsPart)
+                                       : (xg::isDrumMode (partMode) || msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit);
 
             if (isDrum)
             {
-                const auto& setup = (partMode == xg::PartMode::Drums2 || partMode == xg::PartMode::Drums4)
-                                        ? drumSetup2 : drumSetup1;
-                if (juce::isPositiveAndBelow (noteNumber, 128))
+                if (gsMode)
                 {
-                    const auto& noteParams = setup.notes[static_cast<size_t> (noteNumber)];
-                    if (noteParams.modified && noteParams.rcvNoteOff == 0)
-                        return;
+                    const auto& setup = (gsPart == gs::PartMode::Drum2) ? gsDrumSetup2 : gsDrumSetup1;
+                    if (juce::isPositiveAndBelow (noteNumber, 128))
+                    {
+                        const auto& noteParams = setup.notes[static_cast<size_t> (noteNumber)];
+                        if (noteParams.modified && noteParams.rcvNoteOff == 0)
+                            return;
 
-                    const auto group = noteParams.alternateGroup;
-                    if (group > 0 && group < 128 && activeGroupNote[index][static_cast<size_t> (group)] == noteNumber)
-                        activeGroupNote[index][static_cast<size_t> (group)] = -1;
+                        const auto group = noteParams.alternateGroup;
+                        if (group > 0 && group < 128 && activeGroupNote[index][static_cast<size_t> (group)] == noteNumber)
+                            activeGroupNote[index][static_cast<size_t> (group)] = -1;
+                    }
+                }
+                else
+                {
+                    const auto& setup = (partMode == xg::PartMode::Drums2 || partMode == xg::PartMode::Drums4)
+                                            ? drumSetup2 : drumSetup1;
+                    if (juce::isPositiveAndBelow (noteNumber, 128))
+                    {
+                        const auto& noteParams = setup.notes[static_cast<size_t> (noteNumber)];
+                        if (noteParams.modified && noteParams.rcvNoteOff == 0)
+                            return;
+
+                        const auto group = noteParams.alternateGroup;
+                        if (group > 0 && group < 128 && activeGroupNote[index][static_cast<size_t> (group)] == noteNumber)
+                            activeGroupNote[index][static_cast<size_t> (group)] = -1;
+                    }
                 }
                 fluid_synth_noteoff (activeSynth->synth, channel, noteNumber);
             }
@@ -2209,35 +2952,59 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
             return;
         }
 
+        const auto isGs = (activeMode == ActiveMode::GS);
+
         if (controller == 0)
         {
-            if (channel == 9 && drumPartProtectMode[9].load (std::memory_order_acquire) && value < 126)
+            if (isGs)
             {
-                // Protected drum channel ignores melodic Bank MSB 0..125
+                // GS Mode: CC#0 is Variation Bank
+                channelBankMsb[index].store (value, std::memory_order_release);
+                gsPartParameters[index].variationBank = static_cast<uint8_t> (value);
+                const auto lsb = channelBankLsb[index].load (std::memory_order_acquire);
+                channelBank[index].store ((value << 7) | (lsb & 0x7f), std::memory_order_release);
             }
             else
             {
-                channelBankMsb[index].store (value, std::memory_order_release);
-                const auto lsb = channelBankLsb[index].load (std::memory_order_acquire);
-                channelBank[index].store ((value << 7) | (lsb & 0x7f), std::memory_order_release);
+                if (channel == 9 && drumPartProtectMode[9].load (std::memory_order_acquire) && value < 126)
+                {
+                    // Protected drum channel ignores melodic Bank MSB 0..125
+                }
+                else
+                {
+                    channelBankMsb[index].store (value, std::memory_order_release);
+                    const auto lsb = channelBankLsb[index].load (std::memory_order_acquire);
+                    channelBank[index].store ((value << 7) | (lsb & 0x7f), std::memory_order_release);
 
-                if (value == xg::bankMsbDrumKit || value == xg::bankMsbSfxKit)
-                    channelPartMode[index].store (static_cast<uint8_t> (xg::PartMode::Drum), std::memory_order_release);
-                else if (value == xg::bankMsbNormal)
-                    channelPartMode[index].store (static_cast<uint8_t> (xg::PartMode::Normal), std::memory_order_release);
+                    if (value == xg::bankMsbDrumKit || value == xg::bankMsbSfxKit)
+                        channelPartMode[index].store (static_cast<uint8_t> (xg::PartMode::Drum), std::memory_order_release);
+                    else if (value == xg::bankMsbNormal)
+                        channelPartMode[index].store (static_cast<uint8_t> (xg::PartMode::Normal), std::memory_order_release);
+                }
             }
         }
         else if (controller == 32)
         {
-            const auto partModeRaw = channelPartMode[index].load (std::memory_order_acquire);
-            const auto msb = channelBankMsb[index].load (std::memory_order_acquire);
-            const auto isDrum = xg::isDrumMode (static_cast<xg::PartMode> (partModeRaw)) || msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit;
-
-            // XG note 4: Bank LSB is ignored/fixed to 0 for drum kit
-            if (! isDrum)
+            if (isGs)
             {
+                // GS Mode: CC#32 is Tone Map Number (0=Default/SC-88, 1=SC-55, 2=SC-88)
                 channelBankLsb[index].store (value, std::memory_order_release);
-                channelBank[index].store ((msb << 7) | value, std::memory_order_release);
+                gsPartParameters[index].toneMap = static_cast<uint8_t> (value);
+                const auto msb = channelBankMsb[index].load (std::memory_order_acquire);
+                channelBank[index].store ((msb << 7) | (value & 0x7f), std::memory_order_release);
+            }
+            else
+            {
+                const auto partModeRaw = channelPartMode[index].load (std::memory_order_acquire);
+                const auto msb = channelBankMsb[index].load (std::memory_order_acquire);
+                const auto isDrum = xg::isDrumMode (static_cast<xg::PartMode> (partModeRaw)) || msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit;
+
+                // XG note 4: Bank LSB is ignored/fixed to 0 for drum kit
+                if (! isDrum)
+                {
+                    channelBankLsb[index].store (value, std::memory_order_release);
+                    channelBank[index].store ((msb << 7) | value, std::memory_order_release);
+                }
             }
         }
 
@@ -2259,9 +3026,11 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
         fluid_synth_cc (activeSynth->synth, channel, controller, value);
         if (controller == 0)
         {
+            const auto gsPart = static_cast<gs::PartMode> (channelGsPartMode[index].load (std::memory_order_acquire));
             const auto partModeRaw = channelPartMode[index].load (std::memory_order_acquire);
             const auto msb = channelBankMsb[index].load (std::memory_order_acquire);
-            const auto isDrum = xg::isDrumMode (static_cast<xg::PartMode> (partModeRaw)) || msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit;
+            const auto isDrum = isGs ? gs::isDrumMode (gsPart)
+                                     : (xg::isDrumMode (static_cast<xg::PartMode> (partModeRaw)) || msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit);
             fluid_synth_set_channel_type (activeSynth->synth, channel, isDrum ? CHANNEL_TYPE_DRUM : CHANNEL_TYPE_MELODIC);
         }
         if (controller == 7)

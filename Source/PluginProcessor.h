@@ -75,7 +75,11 @@ public:
     void setChannelPartMode (int channel, xg::PartMode mode) noexcept;
     void setChannelProgram (int channel, int value) noexcept;
 
+    FluidSynthEngine::EngineMode getEngineMode() const noexcept;
+    void setEngineMode (FluidSynthEngine::EngineMode mode) noexcept;
+    FluidSynthEngine::ActiveMode getActiveMode() const noexcept;
     bool isXgMode() const noexcept;
+    bool isGsMode() const noexcept;
     const xg::PartParameters& getPartParameters (int channel) const noexcept;
     const xg::DrumSetup& getDrumSetup (int setupIndex) const noexcept;
 

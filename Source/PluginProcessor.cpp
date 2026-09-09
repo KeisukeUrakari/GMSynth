@@ -293,6 +293,7 @@ void GMSynthAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
     }
 
     state.setAttribute ("masterVolumeDb", getMasterVolumeDb());
+    state.setAttribute ("engineMode", static_cast<int> (getEngineMode()));
 
     copyXmlToBinary (state, destData);
 }
@@ -314,6 +315,9 @@ void GMSynthAudioProcessor::setStateInformation (const void* data, int sizeInByt
         soundFontPath = path;
         soundFontBookmark = bookmarkData;
     }
+
+    if (state->hasAttribute ("engineMode"))
+        setEngineMode (static_cast<FluidSynthEngine::EngineMode> (state->getIntAttribute ("engineMode", 0)));
 
     for (int channel = 0; channel < 16; ++channel)
     {
@@ -428,9 +432,29 @@ void GMSynthAudioProcessor::setChannelProgram (int channel, int value) noexcept
     synthEngine.setChannelProgram (channel, value);
 }
 
+FluidSynthEngine::EngineMode GMSynthAudioProcessor::getEngineMode() const noexcept
+{
+    return synthEngine.getEngineMode();
+}
+
+void GMSynthAudioProcessor::setEngineMode (FluidSynthEngine::EngineMode mode) noexcept
+{
+    synthEngine.setEngineMode (mode);
+}
+
+FluidSynthEngine::ActiveMode GMSynthAudioProcessor::getActiveMode() const noexcept
+{
+    return synthEngine.getActiveMode();
+}
+
 bool GMSynthAudioProcessor::isXgMode() const noexcept
 {
     return synthEngine.isXgMode();
+}
+
+bool GMSynthAudioProcessor::isGsMode() const noexcept
+{
+    return synthEngine.isGsMode();
 }
 
 const xg::PartParameters& GMSynthAudioProcessor::getPartParameters (int channel) const noexcept

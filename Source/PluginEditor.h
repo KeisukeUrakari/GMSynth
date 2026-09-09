@@ -98,6 +98,9 @@ private:
     };
 
     std::unique_ptr<StateUpdateTimer> stateUpdateTimer;
+    std::unique_ptr<juce::ComboBox> modeComboBox;
+    FluidSynthEngine::ActiveMode previousActiveMode = FluidSynthEngine::ActiveMode::GM;
+    FluidSynthEngine::EngineMode previousEngineMode = FluidSynthEngine::EngineMode::Auto;
     bool previousXgMode = false;
     //[/UserVariables]
 

@@ -275,7 +275,7 @@ namespace xg
 
     inline float vibratoDepthOffsetToCents (int depth) noexcept
     {
-        return static_cast<float> (depth - 64) * 4.0f;
+        return (depth > 64) ? static_cast<float> (depth - 64) * 2.0f : 0.0f;
     }
 
     inline float vibratoDelayOffsetToTimecents (int delay) noexcept
