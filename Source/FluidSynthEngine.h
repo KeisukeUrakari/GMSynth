@@ -210,6 +210,7 @@ private:
     std::array<std::atomic<uint8_t>, numMidiChannels> channelGsPartMode;
     std::array<std::atomic<bool>, numMidiChannels> drumPartProtectMode;
     std::array<std::atomic<int>, numMidiChannels> channelProgram;
+    std::array<std::atomic<uint8_t>, numMidiChannels> channelModulation;
     std::atomic<float> masterGain { 0.8f };
 
     xg::SystemParameters systemParameters;
