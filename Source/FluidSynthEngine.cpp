@@ -65,12 +65,20 @@ FluidSynthEngine::FluidSynthEngine()
         channelProgram[index].store (0, std::memory_order_relaxed);
     }
 
+    systemParameters.reset();
     for (auto& nrpn : nrpnStates)
         nrpn.reset();
     for (auto& part : partParameters)
         part.reset();
     drumSetup1.reset();
     drumSetup2.reset();
+
+    for (auto& chanMap : activeNoteTransposition)
+        for (size_t n = 0; n < 128; ++n)
+            chanMap[n] = static_cast<uint8_t> (n);
+
+    for (auto& chanGroups : activeGroupNote)
+        chanGroups.fill (-1);
 
     appliedChannelMute.fill (false);
     appliedChannelVolume.fill (-1);
@@ -346,6 +354,10 @@ void FluidSynthEngine::initializeSynthChannelState (SynthInstance& instance) noe
     if (instance.synth == nullptr)
         return;
 
+    const auto baseGain = masterGain.load (std::memory_order_acquire);
+    const auto volRatio = static_cast<float> (systemParameters.masterVolume) / 127.0f;
+    fluid_synth_set_gain (instance.synth, baseGain * volRatio);
+
     for (int channel = 0; channel < numMidiChannels; ++channel)
     {
         const auto index = static_cast<size_t> (channel);
@@ -366,6 +378,9 @@ void FluidSynthEngine::initializeSynthChannelState (SynthInstance& instance) noe
         applyProgramChangeToSynth (instance, channel, program, bank, isPercussion);
 
         const auto& params = partParameters[index];
+        const auto totalCents = systemParameters.masterTuneCents + params.detuneCents;
+        fluid_synth_set_gen (instance.synth, channel, GEN_FINETUNE, totalCents);
+
         fluid_synth_set_gen (instance.synth, channel, GEN_FILTERFC, xg::cutoffOffsetToCents (params.filterCutoff));
         fluid_synth_set_gen (instance.synth, channel, GEN_FILTERQ, xg::resonanceOffsetToCentibels (params.filterResonance));
         const auto attackOfs = xg::attackOffsetToTimecents (params.egAttack);
@@ -545,11 +560,43 @@ void FluidSynthEngine::setXgMode (bool enabled) noexcept
 void FluidSynthEngine::setMasterGain (float gain) noexcept
 {
     masterGain.store (juce::jmax (0.0f, gain), std::memory_order_release);
+    updateMasterVolume();
 }
 
 float FluidSynthEngine::getMasterGain() const noexcept
 {
     return masterGain.load (std::memory_order_acquire);
+}
+
+void FluidSynthEngine::updateMasterVolume() noexcept
+{
+    if (activeSynth != nullptr)
+    {
+        const auto baseGain = masterGain.load (std::memory_order_acquire);
+        const auto volRatio = static_cast<float> (systemParameters.masterVolume) / 127.0f;
+        const auto desiredMasterGain = baseGain * volRatio;
+        fluid_synth_set_gain (activeSynth->synth, desiredMasterGain);
+        appliedMasterGain = desiredMasterGain;
+    }
+}
+
+void FluidSynthEngine::updateChannelTuning (int channel) noexcept
+{
+    if (activeSynth == nullptr || ! juce::isPositiveAndBelow (channel, numMidiChannels))
+        return;
+
+    const auto index = static_cast<size_t> (channel);
+    const auto totalCents = systemParameters.masterTuneCents + partParameters[index].detuneCents;
+    fluid_synth_set_gen (activeSynth->synth, channel, GEN_FINETUNE, totalCents);
+}
+
+void FluidSynthEngine::updateAllChannelTunings() noexcept
+{
+    if (activeSynth == nullptr)
+        return;
+
+    for (int channel = 0; channel < numMidiChannels; ++channel)
+        updateChannelTuning (channel);
 }
 
 void FluidSynthEngine::resetChannelState (int channel) noexcept
@@ -574,7 +621,11 @@ void FluidSynthEngine::resetChannelState (int channel) noexcept
 
     partParameters[index].reset();
     nrpnStates[index].reset();
+    for (size_t n = 0; n < 128; ++n)
+        activeNoteTransposition[index][n] = static_cast<uint8_t> (n);
+    activeGroupNote[index].fill (-1);
     resetAllGenerators (channel);
+    updateChannelTuning (channel);
 }
 
 void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexcept
@@ -596,135 +647,417 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
         && data[6] == 0x7f
         && data[7] == 0x00;
 
-    const auto isXgSystemOn = numBytes >= 7
+    const auto isXg = numBytes >= 7
         && data[0] == 0x43
         && (data[1] & 0xf0) == 0x10
-        && data[2] == 0x4c
-        && data[3] == 0x00
-        && data[4] == 0x00
-        && data[5] == 0x7e
-        && data[6] == 0x00;
+        && data[2] == 0x4c;
 
-    const auto isXgAllParamReset = numBytes >= 7
-        && data[0] == 0x43
-        && (data[1] & 0xf0) == 0x10
-        && data[2] == 0x4c
-        && data[3] == 0x00
-        && data[4] == 0x00
-        && data[5] == 0x7f
-        && data[6] == 0x00;
-
-    const auto isXgMultiPart = numBytes >= 7
-        && data[0] == 0x43
-        && (data[1] & 0xf0) == 0x10
-        && data[2] == 0x4c
-        && data[3] == 0x08;
-
-    if (isGmReset)
+    if (isGmReset || isGsReset)
     {
         isXgModeActive.store (false, std::memory_order_release);
+        systemParameters.reset();
         drumSetup1.reset();
         drumSetup2.reset();
-    }
-    else if (isXgSystemOn || isXgAllParamReset)
-    {
-        isXgModeActive.store (true, std::memory_order_release);
-        drumSetup1.reset();
-        drumSetup2.reset();
-    }
-    else if (isXgMultiPart)
-    {
-        const auto part = data[4] & 0x1f; // 0..15
-        const auto param = data[5];
-        const auto val = data[6];
 
-        if (juce::isPositiveAndBelow (static_cast<int> (part), numMidiChannels))
+        if (activeSynth != nullptr)
         {
-            const auto index = static_cast<size_t> (part);
-            if (param == 0x01) // Bank Select MSB
-            {
-                channelBankMsb[index].store (val, std::memory_order_release);
-                channelBank[index].store ((val << 7) | channelBankLsb[index].load (std::memory_order_acquire), std::memory_order_release);
-                if (val == xg::bankMsbDrumKit || val == xg::bankMsbSfxKit)
-                    channelPartMode[index].store (static_cast<uint8_t> (xg::PartMode::Drum), std::memory_order_release);
-                else if (val == xg::bankMsbNormal)
-                    channelPartMode[index].store (static_cast<uint8_t> (xg::PartMode::Normal), std::memory_order_release);
-                channelStateNeedsApply = true;
-            }
-            else if (param == 0x02) // Bank Select LSB
-            {
-                channelBankLsb[index].store (val, std::memory_order_release);
-                channelBank[index].store ((channelBankMsb[index].load (std::memory_order_acquire) << 7) | val, std::memory_order_release);
-                channelStateNeedsApply = true;
-            }
-            else if (param == 0x03) // Program Number
-            {
-                channelProgram[index].store (val, std::memory_order_release);
-                channelStateNeedsApply = true;
-            }
-            else if (param == 0x07) // Part Mode (0: Normal, 1: Drum, 2..5: Drums 1..4)
-            {
-                const auto mode = static_cast<xg::PartMode> (val);
-                channelPartMode[index].store (static_cast<uint8_t> (mode), std::memory_order_release);
-                if (mode == xg::PartMode::Normal)
-                {
-                    if (channelBankMsb[index].load (std::memory_order_acquire) >= 126)
-                    {
-                        channelBankMsb[index].store (0, std::memory_order_release);
-                        channelBank[index].store (channelBankLsb[index].load (std::memory_order_acquire), std::memory_order_release);
-                    }
-                    if (part == 9)
-                        drumPartProtectMode[9].store (false, std::memory_order_release);
-                }
-                else
-                {
-                    if (channelBankMsb[index].load (std::memory_order_acquire) < 126)
-                    {
-                        channelBankMsb[index].store (xg::bankMsbDrumKit, std::memory_order_release);
-                        channelBank[index].store ((xg::bankMsbDrumKit << 7) | channelBankLsb[index].load (std::memory_order_acquire), std::memory_order_release);
-                    }
-                }
-                channelStateNeedsApply = true;
-            }
+            int handled = 0;
+            fluid_synth_sysex (activeSynth->synth,
+                               reinterpret_cast<const char*> (data),
+                               numBytes,
+                               nullptr,
+                               nullptr,
+                               &handled,
+                               0);
         }
-        return;
-    }
-    else if (! isGsReset)
-    {
-        return;
-    }
-    else
-    {
-        drumSetup1.reset();
-        drumSetup2.reset();
-    }
 
-    if (activeSynth != nullptr)
-    {
-        int handled = 0;
-        fluid_synth_sysex (activeSynth->synth,
-                           reinterpret_cast<const char*> (data),
-                           numBytes,
-                           nullptr,
-                           nullptr,
-                           &handled,
-                           0);
-    }
-
-    for (int channel = 0; channel < numMidiChannels; ++channel)
-        resetChannelState (channel);
-
-    if (activeSynth != nullptr)
-    {
         for (int channel = 0; channel < numMidiChannels; ++channel)
+            resetChannelState (channel);
+
+        if (activeSynth != nullptr)
         {
-            const auto partMode = static_cast<xg::PartMode> (channelPartMode[static_cast<size_t> (channel)].load (std::memory_order_acquire));
-            const auto isDrum = xg::isDrumMode (partMode);
-            fluid_synth_set_channel_type (activeSynth->synth, channel, isDrum ? CHANNEL_TYPE_DRUM : CHANNEL_TYPE_MELODIC);
+            for (int channel = 0; channel < numMidiChannels; ++channel)
+            {
+                const auto partMode = static_cast<xg::PartMode> (channelPartMode[static_cast<size_t> (channel)].load (std::memory_order_acquire));
+                const auto isDrum = xg::isDrumMode (partMode);
+                fluid_synth_set_channel_type (activeSynth->synth, channel, isDrum ? CHANNEL_TYPE_DRUM : CHANNEL_TYPE_MELODIC);
+            }
         }
+
+        channelStateNeedsApply = true;
+        updateMasterVolume();
+        updateAllChannelTunings();
+        return;
     }
 
-    channelStateNeedsApply = true;
+    if (! isXg)
+        return;
+
+    const auto addrHigh = data[3];
+    const auto addrMid  = data[4];
+    const auto addrLow  = data[5];
+    const auto numData  = numBytes - 6;
+    const auto* dataPtr = data + 6;
+
+    // 1. XG System Data (00 00 aa)
+    if (addrHigh == 0x00 && addrMid == 0x00)
+    {
+        if (addrLow == 0x7e && numData >= 1 && dataPtr[0] == 0x00)
+        {
+            // XG System On
+            isXgModeActive.store (true, std::memory_order_release);
+            systemParameters.reset();
+            drumSetup1.reset();
+            drumSetup2.reset();
+            for (int channel = 0; channel < numMidiChannels; ++channel)
+                resetChannelState (channel);
+
+            if (activeSynth != nullptr)
+            {
+                for (int channel = 0; channel < numMidiChannels; ++channel)
+                {
+                    const auto partMode = static_cast<xg::PartMode> (channelPartMode[static_cast<size_t> (channel)].load (std::memory_order_acquire));
+                    fluid_synth_set_channel_type (activeSynth->synth, channel, xg::isDrumMode (partMode) ? CHANNEL_TYPE_DRUM : CHANNEL_TYPE_MELODIC);
+                }
+            }
+            channelStateNeedsApply = true;
+            updateMasterVolume();
+            updateAllChannelTunings();
+            return;
+        }
+
+        if (addrLow == 0x7f && numData >= 1 && dataPtr[0] == 0x00)
+        {
+            // All Parameter Reset
+            isXgModeActive.store (true, std::memory_order_release);
+            systemParameters.reset();
+            drumSetup1.reset();
+            drumSetup2.reset();
+            for (int channel = 0; channel < numMidiChannels; ++channel)
+                resetChannelState (channel);
+
+            channelStateNeedsApply = true;
+            updateMasterVolume();
+            updateAllChannelTunings();
+            return;
+        }
+
+        if (addrLow == 0x7d && numData >= 1)
+        {
+            // Drum Setup Reset: 0 for setup 1, 1 for setup 2
+            const auto setupNum = dataPtr[0];
+            if (setupNum == 0)
+                drumSetup1.reset();
+            else if (setupNum == 1)
+                drumSetup2.reset();
+            return;
+        }
+
+        // Other system parameters
+        bool tuneChanged = false;
+        for (int i = 0; i < numData; ++i)
+        {
+            const auto curAddr = addrLow + i;
+            const auto val = dataPtr[i];
+
+            if (curAddr >= 0x00 && curAddr <= 0x03)
+            {
+                systemParameters.masterTuneRaw[static_cast<size_t> (curAddr)] = val & 0x0f;
+                tuneChanged = true;
+            }
+            else if (curAddr == 0x04)
+            {
+                systemParameters.masterVolume = juce::jlimit (0, 127, static_cast<int> (val));
+                updateMasterVolume();
+            }
+            else if (curAddr == 0x05)
+            {
+                systemParameters.masterAttenuator = juce::jlimit (0, 127, static_cast<int> (val));
+            }
+            else if (curAddr == 0x06)
+            {
+                systemParameters.transpose = juce::jlimit (0x28, 0x58, static_cast<int> (val));
+            }
+        }
+
+        if (tuneChanged)
+        {
+            systemParameters.updateMasterTuneFromRaw();
+            updateAllChannelTunings();
+        }
+        return;
+    }
+
+    // 2. Multi Part Parameter Change (08 nn aa)
+    if (addrHigh == 0x08)
+    {
+        const auto part = addrMid & 0x1f; // 0..15
+        if (! juce::isPositiveAndBelow (static_cast<int> (part), numMidiChannels))
+            return;
+
+        const auto channel = static_cast<int> (part);
+        const auto chIdx = static_cast<size_t> (channel);
+        auto& p = partParameters[chIdx];
+
+        for (int i = 0; i < numData; ++i)
+        {
+            const auto curAddr = addrLow + i;
+            const auto val = dataPtr[i];
+
+            switch (curAddr)
+            {
+                case 0x00: // Element Reserve
+                    p.elementReserve = juce::jlimit (0, 32, static_cast<int> (val));
+                    break;
+
+                case 0x01: // Bank Select MSB
+                    channelBankMsb[chIdx].store (val, std::memory_order_release);
+                    channelBank[chIdx].store ((val << 7) | channelBankLsb[chIdx].load (std::memory_order_acquire), std::memory_order_release);
+                    if (val == xg::bankMsbDrumKit || val == xg::bankMsbSfxKit)
+                        channelPartMode[chIdx].store (static_cast<uint8_t> (xg::PartMode::Drum), std::memory_order_release);
+                    else if (val == xg::bankMsbNormal)
+                        channelPartMode[chIdx].store (static_cast<uint8_t> (xg::PartMode::Normal), std::memory_order_release);
+                    channelStateNeedsApply = true;
+                    break;
+
+                case 0x02: // Bank Select LSB
+                    channelBankLsb[chIdx].store (val, std::memory_order_release);
+                    channelBank[chIdx].store ((channelBankMsb[chIdx].load (std::memory_order_acquire) << 7) | val, std::memory_order_release);
+                    channelStateNeedsApply = true;
+                    break;
+
+                case 0x03: // Program Number
+                    channelProgram[chIdx].store (val, std::memory_order_release);
+                    channelStateNeedsApply = true;
+                    break;
+
+                case 0x04: // Rcv Channel
+                    p.rcvChannel = val;
+                    break;
+
+                case 0x05: // Mono/Poly Mode
+                    p.monoPolyMode = (val == 0 ? 0 : 1);
+                    if (activeSynth != nullptr)
+                        fluid_synth_cc (activeSynth->synth, channel, p.monoPolyMode == 0 ? 126 : 127, p.monoPolyMode == 0 ? 1 : 0);
+                    break;
+
+                case 0x06: // Same Note Assign
+                    p.sameNoteAssign = val;
+                    break;
+
+                case 0x07: // Part Mode
+                {
+                    const auto mode = static_cast<xg::PartMode> (val);
+                    channelPartMode[chIdx].store (static_cast<uint8_t> (mode), std::memory_order_release);
+                    if (mode == xg::PartMode::Normal)
+                    {
+                        if (channelBankMsb[chIdx].load (std::memory_order_acquire) >= 126)
+                        {
+                            channelBankMsb[chIdx].store (0, std::memory_order_release);
+                            channelBank[chIdx].store (channelBankLsb[chIdx].load (std::memory_order_acquire), std::memory_order_release);
+                        }
+                        if (part == 9)
+                            drumPartProtectMode[9].store (false, std::memory_order_release);
+                    }
+                    else
+                    {
+                        if (channelBankMsb[chIdx].load (std::memory_order_acquire) < 126)
+                        {
+                            channelBankMsb[chIdx].store (xg::bankMsbDrumKit, std::memory_order_release);
+                            channelBank[chIdx].store ((xg::bankMsbDrumKit << 7) | channelBankLsb[chIdx].load (std::memory_order_acquire), std::memory_order_release);
+                        }
+                    }
+                    channelStateNeedsApply = true;
+                    break;
+                }
+
+                case 0x08: // Note Shift
+                    p.noteShift = juce::jlimit (0x28, 0x58, static_cast<int> (val));
+                    break;
+
+                case 0x09: // Detune MSB
+                    p.detuneMsb = val & 0x0f;
+                    p.updateDetuneCents();
+                    updateChannelTuning (channel);
+                    break;
+
+                case 0x0a: // Detune LSB
+                    p.detuneLsb = val & 0x0f;
+                    p.updateDetuneCents();
+                    updateChannelTuning (channel);
+                    break;
+
+                case 0x0b: // Volume
+                    setChannelVolume (channel, val);
+                    if (activeSynth != nullptr)
+                        fluid_synth_cc (activeSynth->synth, channel, 7, val);
+                    break;
+
+                case 0x0c: // Velocity Sense Depth
+                    p.velocitySenseDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    break;
+
+                case 0x0d: // Velocity Sense Offset
+                    p.velocitySenseOffset = juce::jlimit (0, 127, static_cast<int> (val));
+                    break;
+
+                case 0x0e: // Pan
+                    setChannelPan (channel, val);
+                    if (activeSynth != nullptr)
+                        fluid_synth_cc (activeSynth->synth, channel, 10, val);
+                    break;
+
+                case 0x0f: // Note Limit Low
+                    p.noteLimitLow = juce::jlimit (0, 127, static_cast<int> (val));
+                    break;
+
+                case 0x10: // Note Limit High
+                    p.noteLimitHigh = juce::jlimit (0, 127, static_cast<int> (val));
+                    break;
+
+                case 0x11: // Dry Level
+                    p.dryLevel = juce::jlimit (0, 127, static_cast<int> (val));
+                    break;
+
+                case 0x12: // Chorus Send
+                    setPartChorusSend (channel, val);
+                    break;
+
+                case 0x13: // Reverb Send
+                    setPartReverbSend (channel, val);
+                    break;
+
+                case 0x14: // Variation Send
+                    setPartVariationSend (channel, val);
+                    break;
+
+                case 0x15: // Vibrato Rate
+                    setPartVibratoRate (channel, val);
+                    break;
+
+                case 0x16: // Vibrato Depth
+                    setPartVibratoDepth (channel, val);
+                    break;
+
+                case 0x17: // Vibrato Delay
+                    setPartVibratoDelay (channel, val);
+                    break;
+
+                case 0x18: // Filter Cutoff
+                    setPartFilterCutoff (channel, val);
+                    break;
+
+                case 0x19: // Filter Resonance
+                    setPartFilterResonance (channel, val);
+                    break;
+
+                case 0x1a: // EG Attack
+                    setPartEgAttack (channel, val);
+                    break;
+
+                case 0x1b: // EG Decay
+                    setPartEgDecay (channel, val);
+                    break;
+
+                case 0x1c: // EG Release
+                    setPartEgRelease (channel, val);
+                    break;
+
+                case 0x23: // Bend Pitch Control
+                {
+                    const auto semitones = std::abs (static_cast<int> (val) - 64);
+                    p.pitchBendSensitivity = semitones;
+                    if (activeSynth != nullptr)
+                    {
+                        fluid_synth_cc (activeSynth->synth, channel, 101, 0);
+                        fluid_synth_cc (activeSynth->synth, channel, 100, 0);
+                        fluid_synth_cc (activeSynth->synth, channel, 6, semitones);
+                        fluid_synth_cc (activeSynth->synth, channel, 101, 127);
+                        fluid_synth_cc (activeSynth->synth, channel, 100, 127);
+                    }
+                    break;
+                }
+
+                case 0x67: // Portamento Switch
+                    p.portamentoSwitch = (val != 0 ? 1 : 0);
+                    if (activeSynth != nullptr)
+                        fluid_synth_cc (activeSynth->synth, channel, 65, val != 0 ? 127 : 0);
+                    break;
+
+                case 0x68: // Portamento Time
+                    p.portamentoTime = juce::jlimit (0, 127, static_cast<int> (val));
+                    if (activeSynth != nullptr)
+                        fluid_synth_cc (activeSynth->synth, channel, 5, p.portamentoTime);
+                    break;
+
+                case 0x72: // EQ Bass Gain
+                    p.eqBass = juce::jlimit (0, 127, static_cast<int> (val));
+                    break;
+
+                case 0x73: // EQ Treble Gain
+                    p.eqTreble = juce::jlimit (0, 127, static_cast<int> (val));
+                    break;
+
+                case 0x76: // EQ Bass Frequency
+                    p.eqBassFreq = juce::jlimit (0, 127, static_cast<int> (val));
+                    break;
+
+                case 0x77: // EQ Treble Frequency
+                    p.eqTrebleFreq = juce::jlimit (0, 127, static_cast<int> (val));
+                    break;
+
+                default:
+                    break;
+            }
+        }
+        return;
+    }
+
+    // 3. Drum Setup Parameter Change (3n rr aa)
+    if ((addrHigh & 0xf0) == 0x30)
+    {
+        const auto setupIdx = addrHigh & 0x0f; // 0: Setup 1 (30H), 1: Setup 2 (31H)
+        if (setupIdx > 1)
+            return;
+
+        auto& setup = (setupIdx == 1 ? drumSetup2 : drumSetup1);
+        const auto drumNote = addrMid;
+        if (! juce::isPositiveAndBelow (static_cast<int> (drumNote), 128))
+            return;
+
+        auto& note = setup.notes[drumNote];
+        note.modified = true;
+
+        for (int i = 0; i < numData; ++i)
+        {
+            const auto curAddr = addrLow + i;
+            const auto val = dataPtr[i];
+
+            switch (curAddr)
+            {
+                case 0x00: note.pitchCoarse = val; break;
+                case 0x01: note.pitchFine = val; break;
+                case 0x02: note.level = val; break;
+                case 0x03: note.alternateGroup = val; break;
+                case 0x04: note.pan = val; break;
+                case 0x05: note.reverbSend = val; break;
+                case 0x06: note.chorusSend = val; break;
+                case 0x07: note.variationSend = val; break;
+                case 0x08: note.keyAssign = val; break;
+                case 0x09: note.rcvNoteOff = val; break;
+                case 0x0a: note.rcvNoteOn = val; break;
+                case 0x0b: note.filterCutoff = val; break;
+                case 0x0c: note.filterResonance = val; break;
+                case 0x0d: note.egAttack = val; break;
+                case 0x0e: note.egDecay1 = val; break;
+                case 0x0f: note.egDecay2 = val; break;
+                case 0x20: note.eqBass = val; break;
+                case 0x21: note.eqTreble = val; break;
+                default: break;
+            }
+        }
+        return;
+    }
 }
 
 void FluidSynthEngine::applyChannelState() noexcept
@@ -733,7 +1066,9 @@ void FluidSynthEngine::applyChannelState() noexcept
         return;
 
     const auto needsApply = channelStateNeedsApply;
-    const auto desiredMasterGain = masterGain.load (std::memory_order_acquire);
+    const auto baseGain = masterGain.load (std::memory_order_acquire);
+    const auto volRatio = static_cast<float> (systemParameters.masterVolume) / 127.0f;
+    const auto desiredMasterGain = baseGain * volRatio;
     if (needsApply || desiredMasterGain != appliedMasterGain)
     {
         fluid_synth_set_gain (activeSynth->synth, desiredMasterGain);
@@ -789,6 +1124,9 @@ void FluidSynthEngine::applyChannelState() noexcept
             handleProgramChange (channel, program);
             appliedChannelProgram[index] = program;
         }
+
+        if (needsApply)
+            updateChannelTuning (channel);
     }
 
     channelStateNeedsApply = false;
@@ -1222,6 +1560,10 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
             const auto msb = channelBankMsb[index].load (std::memory_order_acquire);
             const auto partMode = static_cast<xg::PartMode> (partModeRaw);
             const auto isDrum = xg::isDrumMode (partMode) || msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit;
+            const auto& p = partParameters[index];
+
+            if (noteNumber < p.noteLimitLow || noteNumber > p.noteLimitHigh)
+                return;
 
             if (isDrum && juce::isPositiveAndBelow (noteNumber, 128))
             {
@@ -1231,8 +1573,16 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
 
                 if (noteParams.modified)
                 {
-                    if (noteParams.level == 0)
+                    if (noteParams.rcvNoteOn == 0 || noteParams.level == 0)
                         return;
+
+                    if (noteParams.alternateGroup > 0 && noteParams.alternateGroup < 128)
+                    {
+                        const auto prevNote = activeGroupNote[index][static_cast<size_t> (noteParams.alternateGroup)];
+                        if (prevNote >= 0 && prevNote != noteNumber)
+                            fluid_synth_noteoff (activeSynth->synth, channel, prevNote);
+                        activeGroupNote[index][static_cast<size_t> (noteParams.alternateGroup)] = noteNumber;
+                    }
 
                     const auto scaledVel = juce::jlimit (1, 127, static_cast<int> (std::round (rawVelocity * (static_cast<float> (noteParams.level) / 127.0f))));
 
@@ -1263,15 +1613,58 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
                     }
                     return;
                 }
+
+                fluid_synth_noteon (activeSynth->synth, channel, noteNumber, rawVelocity);
+                return;
             }
 
-            fluid_synth_noteon (activeSynth->synth, channel, noteNumber, rawVelocity);
+            const auto transpose = systemParameters.transpose - 64;
+            const auto shift = p.noteShift - 64;
+            const auto effectiveNote = juce::jlimit (0, 127, noteNumber + transpose + shift);
+            if (juce::isPositiveAndBelow (noteNumber, 128))
+                activeNoteTransposition[index][static_cast<size_t> (noteNumber)] = static_cast<uint8_t> (effectiveNote);
+
+            if (p.monoPolyMode == 0)
+                fluid_synth_all_notes_off (activeSynth->synth, channel);
+
+            fluid_synth_noteon (activeSynth->synth, channel, effectiveNote, rawVelocity);
         }
     }
     else if (message.isNoteOff())
     {
         if (activeSynth != nullptr)
-            fluid_synth_noteoff (activeSynth->synth, channel, message.getNoteNumber());
+        {
+            const auto noteNumber = message.getNoteNumber();
+            const auto index = static_cast<size_t> (channel);
+            const auto partModeRaw = channelPartMode[index].load (std::memory_order_acquire);
+            const auto msb = channelBankMsb[index].load (std::memory_order_acquire);
+            const auto partMode = static_cast<xg::PartMode> (partModeRaw);
+            const auto isDrum = xg::isDrumMode (partMode) || msb == xg::bankMsbDrumKit || msb == xg::bankMsbSfxKit;
+
+            if (isDrum)
+            {
+                const auto& setup = (partMode == xg::PartMode::Drums2 || partMode == xg::PartMode::Drums4)
+                                        ? drumSetup2 : drumSetup1;
+                if (juce::isPositiveAndBelow (noteNumber, 128))
+                {
+                    const auto& noteParams = setup.notes[static_cast<size_t> (noteNumber)];
+                    if (noteParams.modified && noteParams.rcvNoteOff == 0)
+                        return;
+
+                    const auto group = noteParams.alternateGroup;
+                    if (group > 0 && group < 128 && activeGroupNote[index][static_cast<size_t> (group)] == noteNumber)
+                        activeGroupNote[index][static_cast<size_t> (group)] = -1;
+                }
+                fluid_synth_noteoff (activeSynth->synth, channel, noteNumber);
+            }
+            else
+            {
+                int effectiveNote = noteNumber;
+                if (juce::isPositiveAndBelow (noteNumber, 128))
+                    effectiveNote = activeNoteTransposition[index][static_cast<size_t> (noteNumber)];
+                fluid_synth_noteoff (activeSynth->synth, channel, effectiveNote);
+            }
+        }
     }
     else if (message.isController())
     {

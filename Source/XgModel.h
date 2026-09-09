@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 
 namespace xg
@@ -49,6 +50,33 @@ namespace xg
     constexpr int defaultEqBassFreq = 12;        // 0CH
     constexpr int defaultEqTrebleFreq = 54;      // 36H
 
+    struct SystemParameters
+    {
+        std::array<uint8_t, 4> masterTuneRaw { 0, 4, 0, 0 }; // 00 04 00 00 = 1024 (center)
+        float masterTuneCents = 0.0f;                         // -102.4 to +102.3 cents
+        int masterVolume = 127;                               // 0..127 (default 127)
+        int masterAttenuator = 0;                             // 0..127
+        int transpose = 64;                                   // 28H..58H (-24..+24 semitones, 40H = 64 = 0)
+
+        void reset() noexcept
+        {
+            masterTuneRaw = { 0, 4, 0, 0 };
+            masterTuneCents = 0.0f;
+            masterVolume = 127;
+            masterAttenuator = 0;
+            transpose = 64;
+        }
+
+        void updateMasterTuneFromRaw() noexcept
+        {
+            const auto raw = (static_cast<int> (masterTuneRaw[0] & 0x0F) << 12)
+                           | (static_cast<int> (masterTuneRaw[1] & 0x0F) << 8)
+                           | (static_cast<int> (masterTuneRaw[2] & 0x0F) << 4)
+                           | static_cast<int> (masterTuneRaw[3] & 0x0F);
+            masterTuneCents = static_cast<float> (raw - 1024) * 0.1f;
+        }
+    };
+
     enum class ParameterSelection : uint8_t
     {
         None = 0,
@@ -89,6 +117,22 @@ namespace xg
         int eqBassFreq = defaultEqBassFreq;
         int eqTrebleFreq = defaultEqTrebleFreq;
 
+        int noteShift = 64;            // 28H..58H (-24..+24 semitones, 40H = 64 = 0)
+        uint8_t detuneMsb = 0x08;      // 08H
+        uint8_t detuneLsb = 0x00;      // 00H -> 80H = 128 (center = 0 Hz)
+        float detuneCents = 0.0f;      // Detune in cents
+        uint8_t monoPolyMode = 1;      // 0: Mono, 1: Poly (default 1)
+        uint8_t sameNoteAssign = 1;    // 0: Single, 1: Multi, 2: Inst (default 1)
+        uint8_t rcvChannel = 0;        // 0..15, 7FH: OFF
+        int noteLimitLow = 0;          // 0..127
+        int noteLimitHigh = 127;       // 0..127
+        int dryLevel = 127;            // 0..127
+        int velocitySenseDepth = 64;   // 0..127 (default 40H)
+        int velocitySenseOffset = 64;  // 0..127 (default 40H)
+        uint8_t portamentoSwitch = 0;  // 0: Off, 1: On
+        int portamentoTime = 0;        // 0..127
+        int elementReserve = 2;        // 0..32
+
         void reset() noexcept
         {
             filterCutoff = defaultFilterCutoff;
@@ -107,6 +151,37 @@ namespace xg
             eqTreble = defaultEqTreble;
             eqBassFreq = defaultEqBassFreq;
             eqTrebleFreq = defaultEqTrebleFreq;
+
+            noteShift = 64;
+            detuneMsb = 0x08;
+            detuneLsb = 0x00;
+            detuneCents = 0.0f;
+            monoPolyMode = 1;
+            sameNoteAssign = 1;
+            rcvChannel = 0;
+            noteLimitLow = 0;
+            noteLimitHigh = 127;
+            dryLevel = 127;
+            velocitySenseDepth = 64;
+            velocitySenseOffset = 64;
+            portamentoSwitch = 0;
+            portamentoTime = 0;
+            elementReserve = 2;
+        }
+
+        void updateDetuneCents() noexcept
+        {
+            const auto raw = ((detuneMsb & 0x0F) << 4) | (detuneLsb & 0x0F);
+            const auto detuneHz = static_cast<float> (raw - 128) * 0.1f;
+            if (detuneHz == 0.0f)
+            {
+                detuneCents = 0.0f;
+            }
+            else
+            {
+                const auto f = 440.0f + detuneHz;
+                detuneCents = 1200.0f * std::log2 (f / 440.0f);
+            }
         }
     };
 
@@ -115,14 +190,21 @@ namespace xg
         int pitchCoarse = 64;    // 40H (-64..0..+63 semitones)
         int pitchFine = 64;      // 40H (-64..0..+63 cents)
         int level = 127;         // 0..127
+        int alternateGroup = 0;  // 0: off, 1..127
         int pan = 64;            // 40H Center, 0: random, 1..127
         int reverbSend = 40;     // 28H
         int chorusSend = 0;      // 00H
         int variationSend = 0;   // 00H
+        int keyAssign = 0;       // 0: single, 1: multi
+        int rcvNoteOff = 0;      // 0: off, 1: on
+        int rcvNoteOn = 1;       // 0: off, 1: on
         int filterCutoff = 64;   // 40H
         int filterResonance = 64;// 40H
         int egAttack = 64;       // 40H
         int egDecay1 = 64;       // 40H
+        int egDecay2 = 64;       // 40H
+        int eqBass = 64;         // 40H
+        int eqTreble = 64;       // 40H
         bool modified = false;
 
         void reset() noexcept
@@ -130,14 +212,21 @@ namespace xg
             pitchCoarse = 64;
             pitchFine = 64;
             level = 127;
+            alternateGroup = 0;
             pan = 64;
             reverbSend = 40;
             chorusSend = 0;
             variationSend = 0;
+            keyAssign = 0;
+            rcvNoteOff = 0;
+            rcvNoteOn = 1;
             filterCutoff = 64;
             filterResonance = 64;
             egAttack = 64;
             egDecay1 = 64;
+            egDecay2 = 64;
+            eqBass = 64;
+            eqTreble = 64;
             modified = false;
         }
     };

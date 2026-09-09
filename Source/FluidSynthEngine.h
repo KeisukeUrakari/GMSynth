@@ -58,6 +58,7 @@ public:
     void setMasterGain (float gain) noexcept;
     float getMasterGain() const noexcept;
 
+    const xg::SystemParameters& getSystemParameters() const noexcept { return systemParameters; }
     const xg::PartParameters& getPartParameters (int channel) const noexcept;
     const xg::DrumSetup& getDrumSetup (int setupIndex) const noexcept;
     const xg::NrpnState& getNrpnState (int channel) const noexcept;
@@ -137,6 +138,9 @@ private:
     void setPartReverbSend (int channel, int value) noexcept;
     void setPartChorusSend (int channel, int value) noexcept;
     void setPartVariationSend (int channel, int value) noexcept;
+    void updateMasterVolume() noexcept;
+    void updateChannelTuning (int channel) noexcept;
+    void updateAllChannelTunings() noexcept;
     void resetAllGenerators (int channel) noexcept;
     void applyDrumNoteGenerators (fluid_voice_t* voice, const xg::DrumNoteParameters& noteParams) noexcept;
     void renderRange (const juce::MidiBuffer& midiMessages,
@@ -160,10 +164,13 @@ private:
     std::array<std::atomic<int>, numMidiChannels> channelProgram;
     std::atomic<float> masterGain { 0.8f };
 
+    xg::SystemParameters systemParameters;
     std::array<xg::NrpnState, numMidiChannels> nrpnStates;
     std::array<xg::PartParameters, numMidiChannels> partParameters;
     xg::DrumSetup drumSetup1;
     xg::DrumSetup drumSetup2;
+    std::array<std::array<uint8_t, 128>, numMidiChannels> activeNoteTransposition;
+    std::array<std::array<int, 128>, numMidiChannels> activeGroupNote;
 
     juce::AbstractFifo retiredFifo { maxRetiredChanges };
     std::array<RetiredChange, maxRetiredChanges> retiredChanges;
