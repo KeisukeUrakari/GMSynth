@@ -664,11 +664,12 @@ void FluidSynthEngine::updateChorusSettings() noexcept
     fluid_synth_set_chorus_on (activeSynth->synth, 1);
 
     const auto nr = (chorusParameters.typeMsb >= 0x48) ? 4 : 3;
-    const auto level = juce::jlimit (0.0, 10.0, static_cast<double> (chorusParameters.chorusReturn) / 64.0 * 2.0);
+    const auto level = juce::jlimit (0.0, 1.5, static_cast<double> (chorusParameters.chorusReturn) / 64.0 * 0.6);
     const auto speedParam = chorusParameters.parameters[0] > 0 ? chorusParameters.parameters[0] : 64;
-    const auto speed = juce::jlimit (0.1, 10.0, 0.1 + (static_cast<double> (speedParam) / 127.0) * 4.9);
+    const auto speedNorm = static_cast<double> (speedParam) / 127.0;
+    const auto speed = juce::jlimit (0.1, 2.0, 0.1 + std::pow (speedNorm, 2.0) * 0.9);
     const auto depthParam = chorusParameters.parameters[1] > 0 ? chorusParameters.parameters[1] : 64;
-    const auto depth_ms = juce::jlimit (0.0, 21.0, static_cast<double> (depthParam) / 127.0 * 16.0);
+    const auto depth_ms = juce::jlimit (0.0, 6.0, (static_cast<double> (depthParam) / 127.0) * 4.0);
     const auto type = 0;
 
     fluid_synth_set_chorus (activeSynth->synth, nr, level, speed, depth_ms, type);
