@@ -80,6 +80,15 @@ FluidSynthEngine::FluidSynthEngine()
     for (auto& chanGroups : activeGroupNote)
         chanGroups.fill (-1);
 
+    reverbParameters.reset();
+    chorusParameters.reset();
+    variationParameters.reset();
+    multiEqParameters.reset();
+    multiEqFiltersNeedUpdate = true;
+    for (auto& chan : multiEqFilters)
+        for (auto& f : chan)
+            f.reset();
+
     appliedChannelMute.fill (false);
     appliedChannelVolume.fill (-1);
     appliedChannelPan.fill (-1);
@@ -108,6 +117,10 @@ void FluidSynthEngine::prepare (double sampleRate, int samplesPerBlock)
 {
     currentSampleRate.store (juce::jmax (1.0, sampleRate), std::memory_order_release);
     scratchBuffer.setSize (2, juce::jmax (1, samplesPerBlock), false, true, true);
+    multiEqFiltersNeedUpdate = true;
+    for (auto& chan : multiEqFilters)
+        for (auto& f : chan)
+            f.reset();
 }
 
 std::unique_ptr<FluidSynthEngine::SynthInstance> FluidSynthEngine::createSynth (const juce::File& file,
@@ -358,6 +371,9 @@ void FluidSynthEngine::initializeSynthChannelState (SynthInstance& instance) noe
     const auto volRatio = static_cast<float> (systemParameters.masterVolume) / 127.0f;
     fluid_synth_set_gain (instance.synth, baseGain * volRatio);
 
+    updateReverbSettings();
+    updateChorusSettings();
+
     for (int channel = 0; channel < numMidiChannels; ++channel)
     {
         const auto index = static_cast<size_t> (channel);
@@ -599,6 +615,124 @@ void FluidSynthEngine::updateAllChannelTunings() noexcept
         updateChannelTuning (channel);
 }
 
+void FluidSynthEngine::updateReverbSettings() noexcept
+{
+    if (activeSynth == nullptr)
+        return;
+
+    if (reverbParameters.typeMsb == 0)
+    {
+        fluid_synth_set_reverb_on (activeSynth->synth, 0);
+        return;
+    }
+
+    fluid_synth_set_reverb_on (activeSynth->synth, 1);
+
+    double baseRoom = 0.6;
+    if (reverbParameters.typeMsb == 0x01 || reverbParameters.typeMsb == 0x02)
+        baseRoom = 0.8;
+    else if (reverbParameters.typeMsb >= 0x03 && reverbParameters.typeMsb <= 0x05)
+        baseRoom = 0.45;
+    else if (reverbParameters.typeMsb == 0x06 || reverbParameters.typeMsb == 0x07)
+        baseRoom = 0.65;
+    else if (reverbParameters.typeMsb == 0x08)
+        baseRoom = 0.55;
+
+    const auto timeParam = reverbParameters.parameters[0] > 0 ? reverbParameters.parameters[0] : 64;
+    const auto roomsize = juce::jlimit (0.0, 1.0, baseRoom * (static_cast<double> (timeParam) / 64.0));
+
+    const auto dampParam = reverbParameters.parameters[1] > 0 ? reverbParameters.parameters[1] : 64;
+    const auto damping = juce::jlimit (0.0, 1.0, static_cast<double> (dampParam) / 127.0);
+
+    const auto level = juce::jlimit (0.0, 1.0, static_cast<double> (reverbParameters.reverbReturn) / 127.0);
+    const auto width = 1.0;
+
+    fluid_synth_set_reverb (activeSynth->synth, roomsize, damping, width, level);
+}
+
+void FluidSynthEngine::updateChorusSettings() noexcept
+{
+    if (activeSynth == nullptr)
+        return;
+
+    if (chorusParameters.typeMsb == 0)
+    {
+        fluid_synth_set_chorus_on (activeSynth->synth, 0);
+        return;
+    }
+
+    fluid_synth_set_chorus_on (activeSynth->synth, 1);
+
+    const auto nr = (chorusParameters.typeMsb >= 0x48) ? 4 : 3;
+    const auto level = juce::jlimit (0.0, 10.0, static_cast<double> (chorusParameters.chorusReturn) / 64.0 * 2.0);
+    const auto speedParam = chorusParameters.parameters[0] > 0 ? chorusParameters.parameters[0] : 64;
+    const auto speed = juce::jlimit (0.1, 10.0, 0.1 + (static_cast<double> (speedParam) / 127.0) * 4.9);
+    const auto depthParam = chorusParameters.parameters[1] > 0 ? chorusParameters.parameters[1] : 64;
+    const auto depth_ms = juce::jlimit (0.0, 21.0, static_cast<double> (depthParam) / 127.0 * 16.0);
+    const auto type = 0;
+
+    fluid_synth_set_chorus (activeSynth->synth, nr, level, speed, depth_ms, type);
+}
+
+void FluidSynthEngine::updateMultiEqCoefficients() noexcept
+{
+    const auto sr = currentSampleRate.load (std::memory_order_relaxed);
+    if (sr <= 1.0)
+        return;
+
+    const auto nyquist = sr * 0.49;
+
+    auto makeBandCoeff = [sr, nyquist] (int gainVal, int freqIdx, int qVal, int shape, bool isBand1, bool isBand5) -> juce::IIRCoefficients
+    {
+        const auto gainDb = static_cast<float> (gainVal - 64);
+        const auto gainFactor = juce::Decibels::decibelsToGain (gainDb);
+        const auto freq = juce::jlimit (20.0, nyquist, static_cast<double> (xg::lookupEqFrequency (freqIdx)));
+        const auto q = juce::jlimit (0.1, 12.0, static_cast<double> (qVal) / 10.0);
+
+        if (isBand1 && shape == 0)
+            return juce::IIRCoefficients::makeLowShelf (sr, freq, q, gainFactor);
+
+        if (isBand5 && shape == 0)
+            return juce::IIRCoefficients::makeHighShelf (sr, freq, q, gainFactor);
+
+        return juce::IIRCoefficients::makePeakFilter (sr, freq, q, gainFactor);
+    };
+
+    struct BandDef
+    {
+        int gain;
+        int freq;
+        int q;
+        int shape;
+        bool isBand1;
+        bool isBand5;
+    };
+
+    const std::array<BandDef, 5> bands {{
+        { multiEqParameters.gain1, multiEqParameters.freq1, multiEqParameters.q1, multiEqParameters.shape1, true, false },
+        { multiEqParameters.gain2, multiEqParameters.freq2, multiEqParameters.q2, 1, false, false },
+        { multiEqParameters.gain3, multiEqParameters.freq3, multiEqParameters.q3, 1, false, false },
+        { multiEqParameters.gain4, multiEqParameters.freq4, multiEqParameters.q4, 1, false, false },
+        { multiEqParameters.gain5, multiEqParameters.freq5, multiEqParameters.q5, multiEqParameters.shape5, false, true }
+    }};
+
+    for (size_t b = 0; b < 5; ++b)
+    {
+        if (bands[b].gain == 64)
+        {
+            multiEqFilters[0][b].makeInactive();
+            multiEqFilters[1][b].makeInactive();
+        }
+        else
+        {
+            const auto coeff = makeBandCoeff (bands[b].gain, bands[b].freq, bands[b].q, bands[b].shape, bands[b].isBand1, bands[b].isBand5);
+            multiEqFilters[0][b].setCoefficients (coeff);
+            multiEqFilters[1][b].setCoefficients (coeff);
+        }
+    }
+}
+
+
 void FluidSynthEngine::resetChannelState (int channel) noexcept
 {
     if (! juce::isPositiveAndBelow (channel, numMidiChannels))
@@ -658,6 +792,14 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
         systemParameters.reset();
         drumSetup1.reset();
         drumSetup2.reset();
+        reverbParameters.reset();
+        chorusParameters.reset();
+        variationParameters.reset();
+        multiEqParameters.reset();
+        multiEqFiltersNeedUpdate = true;
+        for (auto& chan : multiEqFilters)
+            for (auto& f : chan)
+                f.reset();
 
         if (activeSynth != nullptr)
         {
@@ -687,6 +829,8 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
         channelStateNeedsApply = true;
         updateMasterVolume();
         updateAllChannelTunings();
+        updateReverbSettings();
+        updateChorusSettings();
         return;
     }
 
@@ -709,6 +853,14 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
             systemParameters.reset();
             drumSetup1.reset();
             drumSetup2.reset();
+            reverbParameters.reset();
+            chorusParameters.reset();
+            variationParameters.reset();
+            multiEqParameters.reset();
+            multiEqFiltersNeedUpdate = true;
+            for (auto& chan : multiEqFilters)
+                for (auto& f : chan)
+                    f.reset();
             for (int channel = 0; channel < numMidiChannels; ++channel)
                 resetChannelState (channel);
 
@@ -723,6 +875,8 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
             channelStateNeedsApply = true;
             updateMasterVolume();
             updateAllChannelTunings();
+            updateReverbSettings();
+            updateChorusSettings();
             return;
         }
 
@@ -733,12 +887,22 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
             systemParameters.reset();
             drumSetup1.reset();
             drumSetup2.reset();
+            reverbParameters.reset();
+            chorusParameters.reset();
+            variationParameters.reset();
+            multiEqParameters.reset();
+            multiEqFiltersNeedUpdate = true;
+            for (auto& chan : multiEqFilters)
+                for (auto& f : chan)
+                    f.reset();
             for (int channel = 0; channel < numMidiChannels; ++channel)
                 resetChannelState (channel);
 
             channelStateNeedsApply = true;
             updateMasterVolume();
             updateAllChannelTunings();
+            updateReverbSettings();
+            updateChorusSettings();
             return;
         }
 
@@ -1056,6 +1220,199 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
                 default: break;
             }
         }
+        return;
+    }
+
+    // 4. Effect 1 Parameter Change (02 01 aa)
+    if (addrHigh == 0x02 && addrMid == 0x01)
+    {
+        bool reverbChanged = false;
+        bool chorusChanged = false;
+
+        for (int i = 0; i < numData; ++i)
+        {
+            const auto curAddr = addrLow + i;
+            const auto val = dataPtr[i];
+
+            // --- Reverb (00..1F) ---
+            if (curAddr == 0x00)
+            {
+                reverbParameters.typeMsb = val;
+                reverbChanged = true;
+            }
+            else if (curAddr == 0x01)
+            {
+                reverbParameters.typeLsb = val;
+                reverbChanged = true;
+            }
+            else if (curAddr >= 0x02 && curAddr <= 0x0b)
+            {
+                reverbParameters.parameters[static_cast<size_t> (curAddr - 0x02)] = val;
+                reverbChanged = true;
+            }
+            else if (curAddr == 0x0c)
+            {
+                reverbParameters.reverbReturn = val;
+                reverbChanged = true;
+            }
+            else if (curAddr == 0x0d)
+            {
+                reverbParameters.reverbPan = val;
+            }
+            else if (curAddr >= 0x10 && curAddr <= 0x15)
+            {
+                reverbParameters.parameters[static_cast<size_t> (10 + curAddr - 0x10)] = val;
+                reverbChanged = true;
+            }
+
+            // --- Chorus (20..3F) ---
+            else if (curAddr == 0x20)
+            {
+                chorusParameters.typeMsb = val;
+                chorusChanged = true;
+            }
+            else if (curAddr == 0x21)
+            {
+                chorusParameters.typeLsb = val;
+                chorusChanged = true;
+            }
+            else if (curAddr >= 0x22 && curAddr <= 0x2b)
+            {
+                chorusParameters.parameters[static_cast<size_t> (curAddr - 0x22)] = val;
+                chorusChanged = true;
+            }
+            else if (curAddr == 0x2c)
+            {
+                chorusParameters.chorusReturn = val;
+                chorusChanged = true;
+            }
+            else if (curAddr == 0x2d)
+            {
+                chorusParameters.chorusPan = val;
+            }
+            else if (curAddr == 0x2e)
+            {
+                chorusParameters.sendToReverb = val;
+            }
+            else if (curAddr >= 0x30 && curAddr <= 0x35)
+            {
+                chorusParameters.parameters[static_cast<size_t> (10 + curAddr - 0x30)] = val;
+                chorusChanged = true;
+            }
+
+            // --- Variation (40..7F) ---
+            else if (curAddr == 0x40)
+            {
+                variationParameters.typeMsb = val;
+            }
+            else if (curAddr == 0x41)
+            {
+                variationParameters.typeLsb = val;
+            }
+            else if (curAddr >= 0x42 && curAddr <= 0x55)
+            {
+                const auto paramIdx = static_cast<size_t> ((curAddr - 0x42) / 2);
+                const auto isLsb = ((curAddr - 0x42) % 2) != 0;
+                if (paramIdx < 10)
+                {
+                    if (isLsb)
+                        variationParameters.parameters14Bit[paramIdx] = static_cast<uint16_t> ((variationParameters.parameters14Bit[paramIdx] & 0x3f80) | (val & 0x7f));
+                    else
+                        variationParameters.parameters14Bit[paramIdx] = static_cast<uint16_t> ((variationParameters.parameters14Bit[paramIdx] & 0x007f) | ((val & 0x7f) << 7));
+                }
+            }
+            else if (curAddr == 0x56)
+            {
+                variationParameters.varReturn = val;
+            }
+            else if (curAddr == 0x57)
+            {
+                variationParameters.varPan = val;
+            }
+            else if (curAddr == 0x58)
+            {
+                variationParameters.sendToReverb = val;
+            }
+            else if (curAddr == 0x59)
+            {
+                variationParameters.sendToChorus = val;
+            }
+            else if (curAddr == 0x5a)
+            {
+                variationParameters.connection = static_cast<uint8_t> (val & 0x01);
+            }
+            else if (curAddr == 0x5b)
+            {
+                variationParameters.part = val;
+            }
+            else if (curAddr == 0x5c)
+            {
+                variationParameters.mwControlDepth = val;
+            }
+            else if (curAddr == 0x5d)
+            {
+                variationParameters.bendControlDepth = val;
+            }
+            else if (curAddr == 0x5e)
+            {
+                variationParameters.catControlDepth = val;
+            }
+            else if (curAddr == 0x5f)
+            {
+                variationParameters.ac1ControlDepth = val;
+            }
+            else if (curAddr == 0x60)
+            {
+                variationParameters.ac2ControlDepth = val;
+            }
+            else if (curAddr >= 0x70 && curAddr <= 0x75)
+            {
+                variationParameters.parameters11To16[static_cast<size_t> (curAddr - 0x70)] = val;
+            }
+        }
+
+        if (reverbChanged)
+            updateReverbSettings();
+
+        if (chorusChanged)
+            updateChorusSettings();
+
+        return;
+    }
+
+    // 5. Multi-EQ Parameter Change (02 40 aa)
+    if (addrHigh == 0x02 && addrMid == 0x40)
+    {
+        for (int i = 0; i < numData; ++i)
+        {
+            const auto curAddr = addrLow + i;
+            const auto val = dataPtr[i];
+
+            switch (curAddr)
+            {
+                case 0x00: multiEqParameters.setPreset (val); break;
+                case 0x01: multiEqParameters.gain1 = val; break;
+                case 0x02: multiEqParameters.freq1 = val; break;
+                case 0x03: multiEqParameters.q1 = val; break;
+                case 0x04: multiEqParameters.shape1 = val; break;
+                case 0x05: multiEqParameters.gain2 = val; break;
+                case 0x06: multiEqParameters.freq2 = val; break;
+                case 0x07: multiEqParameters.q2 = val; break;
+                case 0x09: multiEqParameters.gain3 = val; break;
+                case 0x0a: multiEqParameters.freq3 = val; break;
+                case 0x0b: multiEqParameters.q3 = val; break;
+                case 0x0d: multiEqParameters.gain4 = val; break;
+                case 0x0e: multiEqParameters.freq4 = val; break;
+                case 0x0f: multiEqParameters.q4 = val; break;
+                case 0x11: multiEqParameters.gain5 = val; break;
+                case 0x12: multiEqParameters.freq5 = val; break;
+                case 0x13: multiEqParameters.q5 = val; break;
+                case 0x14: multiEqParameters.shape5 = val; break;
+                default: break;
+            }
+        }
+
+        multiEqFiltersNeedUpdate = true;
         return;
     }
 }
@@ -2058,23 +2415,41 @@ void FluidSynthEngine::processBlock (juce::AudioBuffer<float>& buffer,
                      numSamples,
                      buffer.getWritePointer (0),
                      buffer.getWritePointer (1));
-        return;
+    }
+    else
+    {
+        const auto chunkCapacity = juce::jmax (1, scratchBuffer.getNumSamples());
+        for (int offset = 0; offset < numSamples; offset += chunkCapacity)
+        {
+            const auto chunkSize = juce::jmin (chunkCapacity, numSamples - offset);
+            scratchBuffer.clear (0, 0, chunkSize);
+            scratchBuffer.clear (1, 0, chunkSize);
+            renderRange (midiMessages,
+                         offset,
+                         chunkSize,
+                         scratchBuffer.getWritePointer (0),
+                         scratchBuffer.getWritePointer (1));
+
+            if (buffer.getNumChannels() == 1)
+                buffer.copyFrom (0, offset, scratchBuffer, 0, 0, chunkSize);
+        }
     }
 
-    const auto chunkCapacity = juce::jmax (1, scratchBuffer.getNumSamples());
-    for (int offset = 0; offset < numSamples; offset += chunkCapacity)
+    if (! multiEqParameters.isFlat())
     {
-        const auto chunkSize = juce::jmin (chunkCapacity, numSamples - offset);
-        scratchBuffer.clear (0, 0, chunkSize);
-        scratchBuffer.clear (1, 0, chunkSize);
-        renderRange (midiMessages,
-                     offset,
-                     chunkSize,
-                     scratchBuffer.getWritePointer (0),
-                     scratchBuffer.getWritePointer (1));
+        if (multiEqFiltersNeedUpdate)
+        {
+            updateMultiEqCoefficients();
+            multiEqFiltersNeedUpdate = false;
+        }
 
-        if (buffer.getNumChannels() == 1)
-            buffer.copyFrom (0, offset, scratchBuffer, 0, 0, chunkSize);
+        const auto numChans = juce::jmin (2, buffer.getNumChannels());
+        for (int ch = 0; ch < numChans; ++ch)
+        {
+            auto* channelData = buffer.getWritePointer (ch);
+            for (auto& f : multiEqFilters[static_cast<size_t> (ch)])
+                f.processSamples (channelData, numSamples);
+        }
     }
 }
 

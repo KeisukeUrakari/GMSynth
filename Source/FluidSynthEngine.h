@@ -62,6 +62,10 @@ public:
     const xg::PartParameters& getPartParameters (int channel) const noexcept;
     const xg::DrumSetup& getDrumSetup (int setupIndex) const noexcept;
     const xg::NrpnState& getNrpnState (int channel) const noexcept;
+    const xg::ReverbParameters& getReverbParameters() const noexcept { return reverbParameters; }
+    const xg::ChorusParameters& getChorusParameters() const noexcept { return chorusParameters; }
+    const xg::VariationParameters& getVariationParameters() const noexcept { return variationParameters; }
+    const xg::MultiEqParameters& getMultiEqParameters() const noexcept { return multiEqParameters; }
 
 private:
     struct PresetLocation
@@ -141,6 +145,9 @@ private:
     void updateMasterVolume() noexcept;
     void updateChannelTuning (int channel) noexcept;
     void updateAllChannelTunings() noexcept;
+    void updateReverbSettings() noexcept;
+    void updateChorusSettings() noexcept;
+    void updateMultiEqCoefficients() noexcept;
     void resetAllGenerators (int channel) noexcept;
     void applyDrumNoteGenerators (fluid_voice_t* voice, const xg::DrumNoteParameters& noteParams) noexcept;
     void renderRange (const juce::MidiBuffer& midiMessages,
@@ -171,6 +178,13 @@ private:
     xg::DrumSetup drumSetup2;
     std::array<std::array<uint8_t, 128>, numMidiChannels> activeNoteTransposition;
     std::array<std::array<int, 128>, numMidiChannels> activeGroupNote;
+
+    xg::ReverbParameters reverbParameters;
+    xg::ChorusParameters chorusParameters;
+    xg::VariationParameters variationParameters;
+    xg::MultiEqParameters multiEqParameters;
+    std::array<std::array<juce::IIRFilter, 5>, 2> multiEqFilters;
+    bool multiEqFiltersNeedUpdate = true;
 
     juce::AbstractFifo retiredFifo { maxRetiredChanges };
     std::array<RetiredChange, maxRetiredChanges> retiredChanges;

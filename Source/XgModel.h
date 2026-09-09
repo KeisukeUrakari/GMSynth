@@ -282,4 +282,169 @@ namespace xg
     {
         return static_cast<float> (delay - 64) * 32.0f;
     }
+
+    // XG Format V1.35 Table#3 EQ Frequency Table (61 entries: 0 to 60)
+    constexpr std::array<float, 61> eqFrequencyTable = {
+        20.0f,    22.0f,    25.0f,    28.0f,    32.0f,    36.0f,    40.0f,    45.0f,    50.0f,    56.0f,
+        63.0f,    70.0f,    80.0f,    90.0f,   100.0f,   110.0f,   125.0f,   140.0f,   160.0f,   180.0f,
+       200.0f,   225.0f,   250.0f,   280.0f,   315.0f,   355.0f,   400.0f,   450.0f,   500.0f,   560.0f,
+       630.0f,   700.0f,   800.0f,   900.0f,  1000.0f,  1100.0f,  1200.0f,  1400.0f,  1600.0f,  1800.0f,
+      2000.0f,  2200.0f,  2500.0f,  2800.0f,  3200.0f,  3600.0f,  4000.0f,  4500.0f,  5000.0f,  5600.0f,
+      6300.0f,  7000.0f,  8000.0f,  9000.0f, 10000.0f, 11000.0f, 12000.0f, 14000.0f, 16000.0f, 18000.0f,
+     20000.0f
+    };
+
+    inline float lookupEqFrequency (int index) noexcept
+    {
+        if (index < 0) return eqFrequencyTable.front();
+        if (static_cast<size_t> (index) >= eqFrequencyTable.size()) return eqFrequencyTable.back();
+        return eqFrequencyTable[static_cast<size_t> (index)];
+    }
+
+    struct ReverbParameters
+    {
+        uint8_t typeMsb = 0x01; // 01H = Hall 1
+        uint8_t typeLsb = 0x00;
+        std::array<uint8_t, 16> parameters {}; // 1-16
+        uint8_t reverbReturn = 64;             // 40H = 0 dB
+        uint8_t reverbPan = 64;                // 40H = Center
+
+        void reset() noexcept
+        {
+            typeMsb = 0x01;
+            typeLsb = 0x00;
+            parameters.fill (0);
+            parameters[0] = 64; // Reverb Time default
+            parameters[1] = 64; // Diffusion default
+            parameters[4] = 64; // LPF default
+            reverbReturn = 64;
+            reverbPan = 64;
+        }
+    };
+
+    struct ChorusParameters
+    {
+        uint8_t typeMsb = 0x41; // 41H = Chorus 1
+        uint8_t typeLsb = 0x00;
+        std::array<uint8_t, 16> parameters {}; // 1-16
+        uint8_t chorusReturn = 64;             // 40H = 0 dB
+        uint8_t chorusPan = 64;                // 40H = Center
+        uint8_t sendToReverb = 0;              // 00H
+
+        void reset() noexcept
+        {
+            typeMsb = 0x41;
+            typeLsb = 0x00;
+            parameters.fill (0);
+            parameters[0] = 64; // LFO Freq default
+            parameters[1] = 64; // LFO Depth default
+            chorusReturn = 64;
+            chorusPan = 64;
+            sendToReverb = 0;
+        }
+    };
+
+    struct VariationParameters
+    {
+        uint8_t typeMsb = 0x05; // 05H = Delay L,C,R
+        uint8_t typeLsb = 0x00;
+        std::array<uint16_t, 10> parameters14Bit {}; // Params 1..10 (14-bit)
+        uint8_t varReturn = 64;                      // 40H = 0 dB
+        uint8_t varPan = 64;                         // 40H = Center
+        uint8_t sendToReverb = 0;                    // 00H
+        uint8_t sendToChorus = 0;                    // 00H
+        uint8_t connection = 0;                      // 0: Insertion, 1: System (default 0)
+        uint8_t part = 127;                          // 0..15: Part 1..16, 127: OFF (default 127)
+        uint8_t mwControlDepth = 64;                 // 40H = 0
+        uint8_t bendControlDepth = 64;               // 40H = 0
+        uint8_t catControlDepth = 64;                // 40H = 0
+        uint8_t ac1ControlDepth = 64;                // 40H = 0
+        uint8_t ac2ControlDepth = 64;                // 40H = 0
+        std::array<uint8_t, 6> parameters11To16 {};  // Params 11..16
+
+        void reset() noexcept
+        {
+            typeMsb = 0x05;
+            typeLsb = 0x00;
+            parameters14Bit.fill (0);
+            varReturn = 64;
+            varPan = 64;
+            sendToReverb = 0;
+            sendToChorus = 0;
+            connection = 0;
+            part = 127;
+            mwControlDepth = 64;
+            bendControlDepth = 64;
+            catControlDepth = 64;
+            ac1ControlDepth = 64;
+            ac2ControlDepth = 64;
+            parameters11To16.fill (0);
+        }
+    };
+
+    struct MultiEqParameters
+    {
+        uint8_t eqType = 0; // 0: Flat, 1: Jazz, 2: Pops, 3: Rock, 4: Concert
+        int gain1 = 64;     // 34H..4CH (-12..+12 dB, 40H = 64 = 0 dB)
+        int freq1 = 12;     // 04H..28H (default 0CH = 80 Hz)
+        int q1 = 7;         // 01H..78H (default 07H = 0.7)
+        int shape1 = 0;     // 0: shelving, 1: peaking (default 0)
+
+        int gain2 = 64;     // -12..+12 dB
+        int freq2 = 28;     // 0EH..36H (default 1CH = 500 Hz)
+        int q2 = 7;         // default 0.7
+
+        int gain3 = 64;     // -12..+12 dB
+        int freq3 = 34;     // default 22H = 1.0 kHz
+        int q3 = 7;         // default 0.7
+
+        int gain4 = 64;     // -12..+12 dB
+        int freq4 = 46;     // default 2EH = 4.0 kHz
+        int q4 = 7;         // default 0.7
+
+        int gain5 = 64;     // -12..+12 dB
+        int freq5 = 52;     // default 34H = 8.0 kHz
+        int q5 = 7;         // default 0.7
+        int shape5 = 0;     // 0: shelving, 1: peaking (default 0)
+
+        void reset() noexcept
+        {
+            eqType = 0;
+            gain1 = 64; freq1 = 12; q1 = 7; shape1 = 0;
+            gain2 = 64; freq2 = 28; q2 = 7;
+            gain3 = 64; freq3 = 34; q3 = 7;
+            gain4 = 64; freq4 = 46; q4 = 7;
+            gain5 = 64; freq5 = 52; q5 = 7; shape5 = 0;
+        }
+
+        bool isFlat() const noexcept
+        {
+            return gain1 == 64 && gain2 == 64 && gain3 == 64 && gain4 == 64 && gain5 == 64;
+        }
+
+        void setPreset (int type) noexcept
+        {
+            eqType = static_cast<uint8_t> (type);
+            switch (type)
+            {
+                case 0: // Flat
+                    gain1 = 64; gain2 = 64; gain3 = 64; gain4 = 64; gain5 = 64;
+                    break;
+                case 1: // Jazz
+                    gain1 = 64 + 4; gain2 = 64; gain3 = 64 - 2; gain4 = 64 + 2; gain5 = 64 + 3;
+                    break;
+                case 2: // Pops
+                    gain1 = 64 + 3; gain2 = 64 + 1; gain3 = 64; gain4 = 64 + 2; gain5 = 64 + 4;
+                    break;
+                case 3: // Rock
+                    gain1 = 64 + 6; gain2 = 64 + 2; gain3 = 64 - 2; gain4 = 64 + 3; gain5 = 64 + 6;
+                    break;
+                case 4: // Concert
+                    gain1 = 64 + 4; gain2 = 64 - 2; gain3 = 64 - 2; gain4 = 64 + 2; gain5 = 64 + 5;
+                    break;
+                default:
+                    break;
+            }
+        }
+    };
 }
