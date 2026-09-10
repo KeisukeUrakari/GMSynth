@@ -113,6 +113,9 @@ FluidSynthEngine::FluidSynthEngine()
     appliedChannelBankLsb.fill (-1);
     appliedChannelPartMode.fill (255);
     appliedChannelProgram.fill (-1);
+    appliedChannelMonoPoly.fill (255);
+    appliedChannelPortamentoSwitch.fill (255);
+    appliedChannelPortamentoTime.fill (255);
     reclaimerThread.reset (new ReclaimerThread (*this));
 }
 
@@ -197,6 +200,14 @@ std::unique_ptr<FluidSynthEngine::SynthInstance> FluidSynthEngine::createSynth (
 
     fluid_synth_set_reverb_on (instance->synth, 0);
     fluid_synth_set_chorus_on (instance->synth, 0);
+    fluid_synth_set_portamento_time_mode (instance->synth, FLUID_PORTAMENTO_TIME_MODE_XG_GS);
+
+    for (int ch = 0; ch < totalSynthChannels; ++ch)
+    {
+        fluid_synth_set_basic_channel (instance->synth, ch, FLUID_CHANNEL_MODE_OMNIOFF_POLY, 1);
+        fluid_synth_set_portamento_mode (instance->synth, ch, FLUID_CHANNEL_PORTAMENTO_MODE_LEGATO_ONLY);
+        fluid_synth_set_legato_mode (instance->synth, ch, FLUID_CHANNEL_LEGATO_MODE_MULTI_RETRIGGER);
+    }
 
     const auto soundFontId = fluid_synth_sfload (instance->synth,
                                                  file.getFullPathName().toRawUTF8(),
@@ -461,6 +472,7 @@ void FluidSynthEngine::initializeSynthChannelState (SynthInstance& instance) noe
 
     updateReverbSettings();
     updateChorusSettings();
+    fluid_synth_set_portamento_time_mode (instance.synth, FLUID_PORTAMENTO_TIME_MODE_XG_GS);
 
     for (int channel = 0; channel < numMidiChannels; ++channel)
     {
@@ -478,6 +490,14 @@ void FluidSynthEngine::initializeSynthChannelState (SynthInstance& instance) noe
         const auto isPercussion = gsMode ? gs::isDrumMode (gsPart)
                                          : (xg::isDrumMode (partMode) || bankMsb == xg::bankMsbDrumKit || bankMsb == xg::bankMsbSfxKit);
         const auto program = juce::jlimit (0, 127, channelProgram[index].load (std::memory_order_acquire));
+
+        const auto& params = partParameters[index];
+        const auto monoPoly = (params.monoPolyMode == 0) ? FLUID_CHANNEL_MODE_OMNIOFF_MONO : FLUID_CHANNEL_MODE_OMNIOFF_POLY;
+        fluid_synth_set_basic_channel (instance.synth, channel, monoPoly, 1);
+        fluid_synth_set_portamento_mode (instance.synth, channel, FLUID_CHANNEL_PORTAMENTO_MODE_LEGATO_ONLY);
+        fluid_synth_set_legato_mode (instance.synth, channel, FLUID_CHANNEL_LEGATO_MODE_MULTI_RETRIGGER);
+        fluid_synth_cc (instance.synth, channel, 5, params.portamentoTime);
+        fluid_synth_cc (instance.synth, channel, 65, params.portamentoSwitch != 0 ? 127 : 0);
 
         fluid_synth_set_channel_type (instance.synth, channel, isPercussion ? CHANNEL_TYPE_DRUM : CHANNEL_TYPE_MELODIC);
         fluid_synth_cc (instance.synth, channel, 7, muted ? 0 : volume);
@@ -1782,8 +1802,10 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
 
                 case 0x05: // Mono/Poly Mode
                     p.monoPolyMode = (val == 0 ? 0 : 1);
+                    appliedChannelMonoPoly[chIdx] = static_cast<uint8_t> (p.monoPolyMode);
                     if (activeSynth != nullptr)
-                        fluid_synth_cc (activeSynth->synth, channel, p.monoPolyMode == 0 ? 126 : 127, p.monoPolyMode == 0 ? 1 : 0);
+                        fluid_synth_set_basic_channel (activeSynth->synth, channel,
+                                                       p.monoPolyMode == 0 ? FLUID_CHANNEL_MODE_OMNIOFF_MONO : FLUID_CHANNEL_MODE_OMNIOFF_POLY, 1);
                     break;
 
                 case 0x06: // Same Note Assign
@@ -2119,12 +2141,14 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
 
                 case 0x67: // Portamento Switch
                     p.portamentoSwitch = (val != 0 ? 1 : 0);
+                    appliedChannelPortamentoSwitch[chIdx] = p.portamentoSwitch;
                     if (activeSynth != nullptr)
                         fluid_synth_cc (activeSynth->synth, channel, 65, val != 0 ? 127 : 0);
                     break;
 
                 case 0x68: // Portamento Time
                     p.portamentoTime = juce::jlimit (0, 127, static_cast<int> (val));
+                    appliedChannelPortamentoTime[chIdx] = static_cast<uint8_t> (p.portamentoTime);
                     if (activeSynth != nullptr)
                         fluid_synth_cc (activeSynth->synth, channel, 5, p.portamentoTime);
                     break;
@@ -2474,6 +2498,28 @@ void FluidSynthEngine::applyChannelState() noexcept
             appliedChannelProgram[index] = program;
         }
 
+        const auto monoPoly = static_cast<uint8_t> (partParameters[index].monoPolyMode);
+        if (needsApply || monoPoly != appliedChannelMonoPoly[index])
+        {
+            fluid_synth_set_basic_channel (activeSynth->synth, channel,
+                                           monoPoly == 0 ? FLUID_CHANNEL_MODE_OMNIOFF_MONO : FLUID_CHANNEL_MODE_OMNIOFF_POLY, 1);
+            appliedChannelMonoPoly[index] = monoPoly;
+        }
+
+        const auto portSwitch = static_cast<uint8_t> (partParameters[index].portamentoSwitch);
+        if (needsApply || portSwitch != appliedChannelPortamentoSwitch[index])
+        {
+            fluid_synth_cc (activeSynth->synth, channel, 65, portSwitch != 0 ? 127 : 0);
+            appliedChannelPortamentoSwitch[index] = portSwitch;
+        }
+
+        const auto portTime = static_cast<uint8_t> (partParameters[index].portamentoTime);
+        if (needsApply || portTime != appliedChannelPortamentoTime[index])
+        {
+            fluid_synth_cc (activeSynth->synth, channel, 5, portTime);
+            appliedChannelPortamentoTime[index] = portTime;
+        }
+
         if (needsApply)
             updateChannelTuning (channel);
     }
@@ -2557,6 +2603,13 @@ void FluidSynthEngine::resetChannelControllers (int channel) noexcept
     channelAftertouchNorm[index] = 0.0f;
     channelAc1Norm[index] = 0.0f;
     channelAc2Norm[index] = 0.0f;
+    partParameters[index].portamentoSwitch = 0;
+    appliedChannelPortamentoSwitch[index] = 0;
+    if (activeSynth != nullptr)
+    {
+        fluid_synth_cc (activeSynth->synth, channel, 65, 0);
+        fluid_synth_cc (activeSynth->synth, channel, 84, 128);
+    }
 }
 
 void FluidSynthEngine::updateChannelModulation (int channel) noexcept
@@ -3639,9 +3692,6 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
                 const auto transpose = systemParameters.transpose - 64;
                 const auto shift = p.noteShift - 64;
                 effectiveNote = juce::jlimit (0, 127, noteNumber + transpose + shift);
-
-                if (p.monoPolyMode == 0)
-                    fluid_synth_all_notes_off (activeSynth->synth, channel);
             }
 
             if (juce::isPositiveAndBelow (noteNumber, 128))
@@ -3769,6 +3819,21 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
         {
             if (activeSynth != nullptr)
                 fluid_synth_all_notes_off (activeSynth->synth, channel);
+
+            if (controller == 126) // Mono Mode On
+            {
+                partParameters[index].monoPolyMode = 0;
+                appliedChannelMonoPoly[index] = 0;
+                if (activeSynth != nullptr)
+                    fluid_synth_set_basic_channel (activeSynth->synth, channel, FLUID_CHANNEL_MODE_OMNIOFF_MONO, 1);
+            }
+            else if (controller == 127) // Poly Mode On
+            {
+                partParameters[index].monoPolyMode = 1;
+                appliedChannelMonoPoly[index] = 1;
+                if (activeSynth != nullptr)
+                    fluid_synth_set_basic_channel (activeSynth->synth, channel, FLUID_CHANNEL_MODE_OMNIOFF_POLY, 1);
+            }
             return;
         }
 
@@ -3926,6 +3991,31 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
         if (controller == 94) // Variation Send
         {
             setPartVariationSend (channel, value);
+            return;
+        }
+
+        // Portamento Controllers
+        if (controller == 5) // Portamento Time
+        {
+            partParameters[index].portamentoTime = value;
+            appliedChannelPortamentoTime[index] = static_cast<uint8_t> (value);
+            if (activeSynth != nullptr)
+                fluid_synth_cc (activeSynth->synth, channel, 5, value);
+            return;
+        }
+        if (controller == 65) // Portamento Switch
+        {
+            const auto on = (value >= 64 ? 1 : 0);
+            partParameters[index].portamentoSwitch = static_cast<uint8_t> (on);
+            appliedChannelPortamentoSwitch[index] = static_cast<uint8_t> (on);
+            if (activeSynth != nullptr)
+                fluid_synth_cc (activeSynth->synth, channel, 65, value);
+            return;
+        }
+        if (controller == 84) // Portamento Control (Source Key)
+        {
+            if (activeSynth != nullptr)
+                fluid_synth_cc (activeSynth->synth, channel, 84, value);
             return;
         }
 

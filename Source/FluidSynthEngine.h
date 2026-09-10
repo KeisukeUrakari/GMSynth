@@ -310,6 +310,9 @@ private:
     std::array<int, numMidiChannels> appliedChannelBankLsb;
     std::array<uint8_t, numMidiChannels> appliedChannelPartMode;
     std::array<int, numMidiChannels> appliedChannelProgram;
+    std::array<uint8_t, numMidiChannels> appliedChannelMonoPoly {};
+    std::array<uint8_t, numMidiChannels> appliedChannelPortamentoSwitch {};
+    std::array<uint8_t, numMidiChannels> appliedChannelPortamentoTime {};
     float appliedMasterGain = 0.8f;
 
     std::array<float, numMidiChannels> channelModWheelNorm {};
