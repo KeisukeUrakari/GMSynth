@@ -71,9 +71,22 @@ void VariationEffectProcessor::reset()
     for (auto& f : distPreFilters) f.reset();
     for (auto& f : distPostFilters) f.reset();
     for (auto& f : ampSimCabFilters) f.reset();
+    for (auto& f : wahFilters) f.reset();
+    wahLfoPhase = 0.0f;
+    currentModOffset = 0.0f;
 
     phaserProcessor.reset();
     chorusProcessor.reset();
+}
+
+void VariationEffectProcessor::setModulationInputs (float mwNorm, float bendNorm, float catNorm, float ac1Norm, float ac2Norm) noexcept
+{
+    const float targetMod = mwNorm * mwDepth
+                          + bendNorm * bendDepth
+                          + catNorm * catDepth
+                          + ac1Norm * ac1Depth
+                          + ac2Norm * ac2Depth;
+    currentModOffset = juce::jlimit (-2.0f, 2.0f, targetMod);
 }
 
 void VariationEffectProcessor::updateDryWet (uint8_t dwVal, float defaultWetRatio)
@@ -226,11 +239,13 @@ void VariationEffectProcessor::updatePhaserParameters (const xg::VariationParame
 
     // Param 2: LFO Depth (0..1.0)
     const auto depthVal = static_cast<float> (params.parameters14Bit[1] & 0x7F);
-    phaserProcessor.setDepth (depthVal / 127.0f);
+    basePhaserDepth = depthVal / 127.0f;
+    phaserProcessor.setDepth (basePhaserDepth);
 
     // Param 4: Feedback
     const auto fbVal = params.parameters14Bit[3] > 0 ? static_cast<int> (params.parameters14Bit[3] & 0x7F) : 64;
-    phaserProcessor.setFeedback (juce::jlimit (-0.9f, 0.9f, static_cast<float> (fbVal - 64) / 64.0f * 0.85f));
+    basePhaserFeedback = juce::jlimit (-0.9f, 0.9f, static_cast<float> (fbVal - 64) / 64.0f * 0.85f);
+    phaserProcessor.setFeedback (basePhaserFeedback);
 
     // Param 10: Dry / Wet
     updateDryWet (static_cast<uint8_t> (params.parameters14Bit[9] & 0x7F), 0.5f);
@@ -258,7 +273,8 @@ void VariationEffectProcessor::updateChorusParameters (const xg::VariationParame
     chorusProcessor.setRate (0.2f + (rateVal / 127.0f) * 5.0f);
 
     const auto depthVal = static_cast<float> (params.parameters14Bit[1] & 0x7F);
-    chorusProcessor.setDepth (depthVal / 127.0f);
+    baseChorusDepth = depthVal / 127.0f;
+    chorusProcessor.setDepth (baseChorusDepth);
 
     const auto fbVal = params.parameters14Bit[2] > 0 ? static_cast<int> (params.parameters14Bit[2] & 0x7F) : 64;
     chorusProcessor.setFeedback (juce::jlimit (0.0f, 0.8f, static_cast<float> (fbVal - 64) / 64.0f * 0.7f));
@@ -266,45 +282,79 @@ void VariationEffectProcessor::updateChorusParameters (const xg::VariationParame
     updateDryWet (static_cast<uint8_t> (params.parameters14Bit[9] & 0x7F), 0.5f);
 }
 
+void VariationEffectProcessor::updateAutoWahParameters (const xg::VariationParameters& params)
+{
+    // Param 1: LFO Freq (0..127 -> 0.05..20.0 Hz)
+    const auto rateVal = static_cast<float> (params.parameters14Bit[0] & 0x7F);
+    wahLfoRateHz = 0.05f + (rateVal / 127.0f) * 20.0f;
+
+    // Param 2: LFO Depth (0..127 -> 0.0..1.0)
+    const auto depthVal = static_cast<float> (params.parameters14Bit[1] & 0x7F);
+    wahLfoDepth = depthVal / 127.0f;
+
+    // Param 3: Cutoff Frequency Offset / Manual Sweep (0..127 -> 0.0..1.0)
+    const auto cutoffVal = params.parameters14Bit[2] > 0 ? static_cast<float> (params.parameters14Bit[2] & 0x7F) : 64.0f;
+    wahManualCutoff = cutoffVal / 127.0f;
+
+    // Param 4: Resonance (10..120 -> 1.0..12.0)
+    const auto resoVal = params.parameters14Bit[3] > 0 ? static_cast<int> (params.parameters14Bit[3] & 0x7F) : 30;
+    wahResonance = resoVal >= 10 ? juce::jlimit (1.0f, 10.0f, static_cast<float> (resoVal) / 10.0f)
+                                 : juce::jlimit (1.0f, 10.0f, 1.0f + static_cast<float> (resoVal) * 0.2f);
+
+    // Param 10: Dry / Wet (default 100% wet)
+    updateDryWet (static_cast<uint8_t> (params.parameters14Bit[9] & 0x7F), 1.0f);
+}
+
 void VariationEffectProcessor::updateParameters (const xg::VariationParameters& params)
 {
     currentTypeMsb = params.typeMsb;
     currentTypeLsb = params.typeLsb;
 
+    // Controller modulation depths (-64..+63 -> -1.0 .. +0.984)
+    mwDepth   = static_cast<float> (static_cast<int> (params.mwControlDepth) - 64) / 64.0f;
+    bendDepth = static_cast<float> (static_cast<int> (params.bendControlDepth) - 64) / 64.0f;
+    catDepth  = static_cast<float> (static_cast<int> (params.catControlDepth) - 64) / 64.0f;
+    ac1Depth  = static_cast<float> (static_cast<int> (params.ac1ControlDepth) - 64) / 64.0f;
+    ac2Depth  = static_cast<float> (static_cast<int> (params.ac2ControlDepth) - 64) / 64.0f;
+
     switch (currentTypeMsb)
     {
-        case 0x05: // Delay L,C,R
-        case 0x06: // Delay L,R
-        case 0x07: // Echo
-        case 0x08: // Cross Delay
+        case xg::varTypeDelayLCR:
+        case xg::varTypeDelayLR:
+        case xg::varTypeEcho:
+        case xg::varTypeCrossDelay:
             updateDelayParameters (params);
             break;
 
-        case 0x47: // Distortion
-        case 0x48: // Overdrive
-        case 0x49: // Amp Simulator
+        case xg::varTypeDistortion:
+        case xg::varTypeOverdrive:
+        case xg::varTypeAmpSimulator:
             updateDistortionParameters (params);
             break;
 
-        case 0x41: // Flanger
+        case xg::varTypeFlanger:
             updateFlangerParameters (params);
             break;
 
-        case 0x46: // Phaser
+        case xg::varTypeAutoWah:
+            updateAutoWahParameters (params);
+            break;
+
+        case xg::varTypePhaser:
             updatePhaserParameters (params);
             break;
 
-        case 0x44: // Tremolo
-        case 0x45: // Auto Pan
+        case xg::varTypeTremolo:
+        case xg::varTypeAutoPan:
             updateTremoloAutoPanParameters (params);
             break;
 
-        case 0x40: // Chorus / Celeste
-        case 0x42: // Symphonic
+        case xg::varTypeChorus:
+        case xg::varTypeSymphonic:
             updateChorusParameters (params);
             break;
 
-        case 0x00: // Thru
+        case xg::varTypeThru:
         default:
             dryGain = 1.0f;
             wetGain = 0.0f;
@@ -316,6 +366,8 @@ void VariationEffectProcessor::processDelay (const float* inL, const float* inR,
 {
     auto* bufL = delayBuffer[0].data();
     auto* bufR = delayBuffer[1].data();
+
+    const float effFeedback = juce::jlimit (-0.95f, 0.95f, delayFeedback + currentModOffset * 0.4f);
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -356,8 +408,8 @@ void VariationEffectProcessor::processDelay (const float* inL, const float* inR,
         delayDampState[0] += (1.0f - delayDamp) * (delayedL - delayDampState[0]);
         delayDampState[1] += (1.0f - delayDamp) * (delayedR - delayDampState[1]);
 
-        const auto fbL = delayDampState[0] * delayFeedback;
-        const auto fbR = delayDampState[1] * delayFeedback;
+        const auto fbL = delayDampState[0] * effFeedback;
+        const auto fbR = delayDampState[1] * effFeedback;
 
         // Write input + feedback to circular buffer
         if (isCrossDelay)
@@ -393,11 +445,15 @@ void VariationEffectProcessor::processDistortion (const float* inL, const float*
         distPreFilters[1].processSamples (wetR, numSamples);
     }
 
+    const float modFactor = juce::jmax (0.1f, 1.0f + currentModOffset * 1.5f);
+    const float effDrive = distortionDrive * modFactor;
+    const float effOutGain = distortionOutputGain / std::sqrt (modFactor);
+
     // Drive + Waveshape
     for (int i = 0; i < numSamples; ++i)
     {
-        float l = wetL[i] * distortionDrive;
-        float r = wetR[i] * distortionDrive;
+        float l = wetL[i] * effDrive;
+        float r = wetR[i] * effDrive;
 
         if (distType == DistortionType::Overdrive)
         {
@@ -420,8 +476,8 @@ void VariationEffectProcessor::processDistortion (const float* inL, const float*
             wetR[i] = xR - 0.15f * xR * xR * xR;
         }
 
-        wetL[i] *= distortionOutputGain;
-        wetR[i] *= distortionOutputGain;
+        wetL[i] *= effOutGain;
+        wetR[i] *= effOutGain;
     }
 
     // Post-filters
@@ -450,12 +506,13 @@ void VariationEffectProcessor::processFlanger (const float* inL, const float* in
     auto* bufL = flangerBuffer[0].data();
     auto* bufR = flangerBuffer[1].data();
     const auto phaseInc = (twoPi * flangerRateHz) / static_cast<float> (sampleRate);
+    const float effDepthSec = juce::jmax (0.00005f, flangerDepthSec * (1.0f + currentModOffset * 0.8f));
 
     for (int i = 0; i < numSamples; ++i)
     {
         // Left delay
         const auto modL = 0.5f + 0.5f * std::sin (flangerPhase);
-        const auto delaySecL = flangerOffsetSec + flangerDepthSec * modL;
+        const auto delaySecL = flangerOffsetSec + effDepthSec * modL;
         const auto delaySamplesL = delaySecL * static_cast<float> (sampleRate);
 
         float readPosL = static_cast<float> (flangerWritePos) - delaySamplesL;
@@ -467,7 +524,7 @@ void VariationEffectProcessor::processFlanger (const float* inL, const float* in
 
         // Right delay (90 deg phase offset)
         const auto modR = 0.5f + 0.5f * std::sin (flangerPhase + 1.5707963f);
-        const auto delaySecR = flangerOffsetSec + flangerDepthSec * modR;
+        const auto delaySecR = flangerOffsetSec + effDepthSec * modR;
         const auto delaySamplesR = delaySecR * static_cast<float> (sampleRate);
 
         float readPosR = static_cast<float> (flangerWritePos) - delaySamplesR;
@@ -494,6 +551,9 @@ void VariationEffectProcessor::processPhaser (const float* inL, const float* inR
     tempWetBuffer.copyFrom (0, 0, inL, numSamples);
     tempWetBuffer.copyFrom (1, 0, inR, numSamples);
 
+    phaserProcessor.setDepth (juce::jlimit (0.0f, 1.0f, basePhaserDepth + currentModOffset * 0.4f));
+    phaserProcessor.setFeedback (juce::jlimit (-0.95f, 0.95f, basePhaserFeedback + currentModOffset * 0.3f));
+
     juce::dsp::AudioBlock<float> block (tempWetBuffer);
     auto subBlock = block.getSubBlock (0, static_cast<size_t> (numSamples));
     juce::dsp::ProcessContextReplacing<float> context (subBlock);
@@ -511,7 +571,9 @@ void VariationEffectProcessor::processPhaser (const float* inL, const float* inR
 
 void VariationEffectProcessor::processTremoloAutoPan (const float* inL, const float* inR, float* outL, float* outR, int numSamples) noexcept
 {
-    const auto phaseInc = (twoPi * modRateHz) / static_cast<float> (sampleRate);
+    const float effRateHz = juce::jlimit (0.05f, 35.0f, modRateHz * std::pow (2.0f, currentModOffset * 1.5f));
+    const float effDepth = juce::jlimit (0.0f, 1.0f, modDepth + currentModOffset * 0.3f);
+    const auto phaseInc = (twoPi * effRateHz) / static_cast<float> (sampleRate);
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -522,14 +584,14 @@ void VariationEffectProcessor::processTremoloAutoPan (const float* inL, const fl
         {
             // 180 deg out of phase panning
             const auto s = std::sin (modPhase);
-            gainL = 1.0f + modDepth * s;
-            gainR = 1.0f - modDepth * s;
+            gainL = 1.0f + effDepth * s;
+            gainR = 1.0f - effDepth * s;
         }
         else
         {
             // Tremolo: in-phase volume modulation
             const auto mod = 0.5f + 0.5f * std::sin (modPhase);
-            const auto g = 1.0f - modDepth * (1.0f - mod);
+            const auto g = 1.0f - effDepth * (1.0f - mod);
             gainL = g;
             gainR = g;
         }
@@ -550,6 +612,8 @@ void VariationEffectProcessor::processChorus (const float* inL, const float* inR
     tempWetBuffer.copyFrom (0, 0, inL, numSamples);
     tempWetBuffer.copyFrom (1, 0, inR, numSamples);
 
+    chorusProcessor.setDepth (juce::jlimit (0.0f, 1.0f, baseChorusDepth + currentModOffset * 0.4f));
+
     juce::dsp::AudioBlock<float> block (tempWetBuffer);
     auto subBlock = block.getSubBlock (0, static_cast<size_t> (numSamples));
     juce::dsp::ProcessContextReplacing<float> context (subBlock);
@@ -562,6 +626,58 @@ void VariationEffectProcessor::processChorus (const float* inL, const float* inR
     {
         outL[i] = inL[i] * dryGain + wetL[i] * wetGain;
         outR[i] = inR[i] * dryGain + wetR[i] * wetGain;
+    }
+}
+
+void VariationEffectProcessor::processAutoWah (const float* inL, const float* inR, float* outL, float* outR, int numSamples) noexcept
+{
+    const auto nyquist = sampleRate * 0.49;
+    const auto phaseInc = (twoPi * wahLfoRateHz) / static_cast<float> (sampleRate);
+    constexpr int stepSize = 16;
+
+    for (int offset = 0; offset < numSamples; offset += stepSize)
+    {
+        const int chunkLen = juce::jmin (stepSize, numSamples - offset);
+
+        // LFO value (-1.0 .. +1.0)
+        const float lfoVal = std::sin (wahLfoPhase);
+        wahLfoPhase += phaseInc * static_cast<float> (chunkLen);
+        if (wahLfoPhase >= twoPi)
+            wahLfoPhase = std::fmod (wahLfoPhase, twoPi);
+
+        // Modulated normalized cutoff frequency:
+        // Manual Cutoff (0..1) + LFO sweep (+- wahLfoDepth * 0.45) + Controller pedal sweep (+- currentModOffset * 0.55)
+        float normFreq = wahManualCutoff + (lfoVal * wahLfoDepth * 0.45f) + (currentModOffset * 0.55f);
+        normFreq = juce::jlimit (0.01f, 0.99f, normFreq);
+
+        // Exponential frequency mapping: ~180 Hz to ~4500 Hz
+        const double cutoffHz = juce::jlimit (120.0, nyquist, 180.0 * std::pow (2.0, static_cast<double> (normFreq) * 4.65));
+
+        // Resonant bandpass filter
+        const auto coeff = juce::IIRCoefficients::makeBandPass (sampleRate, cutoffHz, wahResonance);
+        wahFilters[0].setCoefficients (coeff);
+        wahFilters[1].setCoefficients (coeff);
+
+        const auto* srcL = inL + offset;
+        const auto* srcR = inR + offset;
+        auto* dstL = outL + offset;
+        auto* dstR = outR + offset;
+
+        // Bandpass gain compensation based on resonance
+        const float bpGain = 1.0f + 0.6f * std::sqrt (wahResonance);
+
+        for (int i = 0; i < chunkLen; ++i)
+        {
+            const float filteredL = wahFilters[0].processSingleSampleRaw (srcL[i]) * bpGain;
+            const float filteredR = wahFilters[1].processSingleSampleRaw (srcR[i]) * bpGain;
+
+            // Blend 20% direct signal for bass body warmth
+            const float wetL = filteredL + 0.2f * srcL[i];
+            const float wetR = filteredR + 0.2f * srcR[i];
+
+            dstL[i] = srcL[i] * dryGain + wetL * wetGain;
+            dstR[i] = srcR[i] * dryGain + wetR * wetGain;
+        }
     }
 }
 
@@ -579,38 +695,42 @@ void VariationEffectProcessor::process (const juce::AudioBuffer<float>& inBuffer
 
     switch (currentTypeMsb)
     {
-        case 0x05: // Delay L,C,R
-        case 0x06: // Delay L,R
-        case 0x07: // Echo
-        case 0x08: // Cross Delay
+        case xg::varTypeDelayLCR:
+        case xg::varTypeDelayLR:
+        case xg::varTypeEcho:
+        case xg::varTypeCrossDelay:
             processDelay (inL, inR, outL, outR, numSamples);
             break;
 
-        case 0x47: // Distortion
-        case 0x48: // Overdrive
-        case 0x49: // Amp Simulator
+        case xg::varTypeDistortion:
+        case xg::varTypeOverdrive:
+        case xg::varTypeAmpSimulator:
             processDistortion (inL, inR, outL, outR, numSamples);
             break;
 
-        case 0x41: // Flanger
+        case xg::varTypeFlanger:
             processFlanger (inL, inR, outL, outR, numSamples);
             break;
 
-        case 0x46: // Phaser
+        case xg::varTypeAutoWah:
+            processAutoWah (inL, inR, outL, outR, numSamples);
+            break;
+
+        case xg::varTypePhaser:
             processPhaser (inL, inR, outL, outR, numSamples);
             break;
 
-        case 0x44: // Tremolo
-        case 0x45: // Auto Pan
+        case xg::varTypeTremolo:
+        case xg::varTypeAutoPan:
             processTremoloAutoPan (inL, inR, outL, outR, numSamples);
             break;
 
-        case 0x40: // Chorus / Celeste
-        case 0x42: // Symphonic
+        case xg::varTypeChorus:
+        case xg::varTypeSymphonic:
             processChorus (inL, inR, outL, outR, numSamples);
             break;
 
-        case 0x00: // Thru
+        case xg::varTypeThru:
         default:
             outBuffer.copyFrom (0, 0, inBuffer, 0, 0, numSamples);
             outBuffer.copyFrom (1, 0, inBuffer, 1, 0, numSamples);

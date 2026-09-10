@@ -2331,22 +2331,27 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
             else if (curAddr == 0x5c)
             {
                 variationParameters.mwControlDepth = val;
+                variationChanged = true;
             }
             else if (curAddr == 0x5d)
             {
                 variationParameters.bendControlDepth = val;
+                variationChanged = true;
             }
             else if (curAddr == 0x5e)
             {
                 variationParameters.catControlDepth = val;
+                variationChanged = true;
             }
             else if (curAddr == 0x5f)
             {
                 variationParameters.ac1ControlDepth = val;
+                variationChanged = true;
             }
             else if (curAddr == 0x60)
             {
                 variationParameters.ac2ControlDepth = val;
+                variationChanged = true;
             }
             else if (curAddr >= 0x70 && curAddr <= 0x75)
             {
@@ -4281,6 +4286,12 @@ void FluidSynthEngine::renderSubRange (int totalSamples, float* destLeft, float*
         if (varIsInsertion && juce::isPositiveAndBelow (varTargetPart, numMidiChannels))
         {
             const auto partIdx = static_cast<size_t> (varTargetPart);
+            variationProcessor.setModulationInputs (channelModWheelNorm[partIdx],
+                                                    channelPitchBendNorm[partIdx],
+                                                    channelAftertouchNorm[partIdx],
+                                                    channelAc1Norm[partIdx],
+                                                    channelAc2Norm[partIdx]);
+
             variationInputBuffer.copyFrom (0, 0, multiPartBuffer, static_cast<int> (partIdx * 2), 0, chunkSize);
             variationInputBuffer.copyFrom (1, 0, multiPartBuffer, static_cast<int> (partIdx * 2 + 1), 0, chunkSize);
 
@@ -4315,6 +4326,13 @@ void FluidSynthEngine::renderSubRange (int totalSamples, float* destLeft, float*
         }
         else if (isXg && variationParameters.connection == 1)
         {
+            // System mode: Part 1 (channel 0) controllers modulate variation
+            variationProcessor.setModulationInputs (channelModWheelNorm[0],
+                                                    channelPitchBendNorm[0],
+                                                    channelAftertouchNorm[0],
+                                                    channelAc1Norm[0],
+                                                    channelAc2Norm[0]);
+
             // System mode: accumulate variation sends from all parts
             for (int ch = 0; ch < numMidiChannels; ++ch)
             {

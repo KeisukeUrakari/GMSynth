@@ -13,6 +13,7 @@ public:
     void reset();
 
     void updateParameters (const xg::VariationParameters& params);
+    void setModulationInputs (float mwNorm, float bendNorm, float catNorm, float ac1Norm, float ac2Norm) noexcept;
 
     void process (const juce::AudioBuffer<float>& inBuffer,
                   juce::AudioBuffer<float>& outBuffer,
@@ -69,6 +70,8 @@ private:
 
     // --- Phaser DSP ---
     juce::dsp::Phaser<float> phaserProcessor;
+    float basePhaserDepth = 0.5f;
+    float basePhaserFeedback = 0.0f;
 
     // --- Tremolo / Auto Pan DSP ---
     float modPhase = 0.0f;
@@ -78,6 +81,23 @@ private:
 
     // --- Chorus DSP ---
     juce::dsp::Chorus<float> chorusProcessor;
+    float baseChorusDepth = 0.5f;
+
+    // --- Auto Wah DSP ---
+    std::array<juce::IIRFilter, 2> wahFilters;
+    float wahLfoPhase = 0.0f;
+    float wahLfoRateHz = 1.0f;
+    float wahLfoDepth = 0.5f;
+    float wahManualCutoff = 0.5f;
+    float wahResonance = 2.5f;
+
+    // --- Controller Modulation ---
+    float mwDepth = 0.0f;
+    float bendDepth = 0.0f;
+    float catDepth = 0.0f;
+    float ac1Depth = 0.0f;
+    float ac2Depth = 0.0f;
+    float currentModOffset = 0.0f;
 
     // Temporary scratch buffer for multi-stage effects
     juce::AudioBuffer<float> tempWetBuffer;
@@ -88,6 +108,7 @@ private:
     void processPhaser (const float* inL, const float* inR, float* outL, float* outR, int numSamples) noexcept;
     void processTremoloAutoPan (const float* inL, const float* inR, float* outL, float* outR, int numSamples) noexcept;
     void processChorus (const float* inL, const float* inR, float* outL, float* outR, int numSamples) noexcept;
+    void processAutoWah (const float* inL, const float* inR, float* outL, float* outR, int numSamples) noexcept;
 
     void updateDelayParameters (const xg::VariationParameters& params);
     void updateDistortionParameters (const xg::VariationParameters& params);
@@ -95,6 +116,7 @@ private:
     void updatePhaserParameters (const xg::VariationParameters& params);
     void updateTremoloAutoPanParameters (const xg::VariationParameters& params);
     void updateChorusParameters (const xg::VariationParameters& params);
+    void updateAutoWahParameters (const xg::VariationParameters& params);
     void updateDryWet (uint8_t dwVal, float defaultWetRatio = 0.5f);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VariationEffectProcessor)

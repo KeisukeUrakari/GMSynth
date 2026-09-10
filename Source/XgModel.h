@@ -394,6 +394,22 @@ namespace xg
         }
     };
 
+    constexpr uint8_t varTypeThru         = 0x00;
+    constexpr uint8_t varTypeDelayLCR     = 0x05;
+    constexpr uint8_t varTypeDelayLR      = 0x06;
+    constexpr uint8_t varTypeEcho         = 0x07;
+    constexpr uint8_t varTypeCrossDelay   = 0x08;
+    constexpr uint8_t varTypeChorus       = 0x40;
+    constexpr uint8_t varTypeFlanger      = 0x41;
+    constexpr uint8_t varTypeSymphonic    = 0x42;
+    constexpr uint8_t varTypeAutoWah      = 0x43;
+    constexpr uint8_t varTypeTremolo      = 0x44;
+    constexpr uint8_t varTypeAutoPan      = 0x45;
+    constexpr uint8_t varTypePhaser       = 0x46;
+    constexpr uint8_t varTypeDistortion   = 0x47;
+    constexpr uint8_t varTypeOverdrive    = 0x48;
+    constexpr uint8_t varTypeAmpSimulator = 0x49;
+
     struct VariationParameters
     {
         uint8_t typeMsb = 0x05; // 05H = Delay L,C,R
