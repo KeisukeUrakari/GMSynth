@@ -182,6 +182,8 @@ private:
     void updateGsReverbSettings() noexcept;
     void updateGsChorusSettings() noexcept;
     void updateMultiEqCoefficients() noexcept;
+    void updatePartEqCoefficients (int channel) noexcept;
+    void updateAllPartEqCoefficients() noexcept;
     void resetAllGenerators (int channel) noexcept;
     void applyDrumNoteGenerators (fluid_voice_t* voice, const xg::DrumNoteParameters& noteParams) noexcept;
     void applyGsDrumNoteGenerators (fluid_voice_t* voice, const gs::DrumNoteParameters& noteParams) noexcept;
@@ -193,6 +195,7 @@ private:
                       int rangeLength,
                       float* left,
                       float* right) noexcept;
+    void renderSubRange (int chunkSize, float* destLeft, float* destRight) noexcept;
     void reclaimRetired() noexcept;
 
     std::atomic<EngineMode> configuredEngineMode { EngineMode::Auto };
@@ -252,6 +255,38 @@ private:
     std::array<uint8_t, numMidiChannels> appliedChannelPartMode;
     std::array<int, numMidiChannels> appliedChannelProgram;
     float appliedMasterGain = 0.8f;
+    struct PartEq
+    {
+        std::array<juce::IIRFilter, 2> bassFilters;
+        std::array<juce::IIRFilter, 2> trebleFilters;
+        bool bassActive = false;
+        bool trebleActive = false;
+        bool needsUpdate = true;
+
+        void reset() noexcept
+        {
+            for (auto& f : bassFilters) f.reset();
+            for (auto& f : trebleFilters) f.reset();
+            bassActive = false;
+            trebleActive = false;
+            needsUpdate = true;
+        }
+    };
+
+    std::array<PartEq, numMidiChannels> partEqs;
+
+    juce::dsp::Reverb reverbProcessor;
+    juce::dsp::Chorus<float> chorusProcessor;
+
+    juce::AudioBuffer<float> multiPartBuffer;
+    std::array<float*, numMidiChannels> partLeftPtrs {};
+    std::array<float*, numMidiChannels> partRightPtrs {};
+
+    juce::AudioBuffer<float> reverbBusBuffer;
+    juce::AudioBuffer<float> chorusBusBuffer;
+    juce::AudioBuffer<float> variationInputBuffer;
+    juce::AudioBuffer<float> variationOutputBuffer;
+
     juce::AudioBuffer<float> scratchBuffer;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FluidSynthEngine)

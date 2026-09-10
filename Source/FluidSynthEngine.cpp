@@ -100,6 +100,9 @@ FluidSynthEngine::FluidSynthEngine()
         for (auto& f : chan)
             f.reset();
 
+    for (auto& eq : partEqs)
+        eq.reset();
+
     appliedChannelMute.fill (false);
     appliedChannelVolume.fill (-1);
     appliedChannelPan.fill (-1);
@@ -126,12 +129,31 @@ FluidSynthEngine::~FluidSynthEngine()
 
 void FluidSynthEngine::prepare (double sampleRate, int samplesPerBlock)
 {
-    currentSampleRate.store (juce::jmax (1.0, sampleRate), std::memory_order_release);
-    scratchBuffer.setSize (2, juce::jmax (1, samplesPerBlock), false, true, true);
+    const auto safeSr = juce::jmax (1.0, sampleRate);
+    const auto safeBlock = juce::jmax (1, samplesPerBlock);
+
+    currentSampleRate.store (safeSr, std::memory_order_release);
+    scratchBuffer.setSize (2, safeBlock, false, true, true);
+
+    multiPartBuffer.setSize (numMidiChannels * 2, safeBlock, false, true, true);
+    reverbBusBuffer.setSize (2, safeBlock, false, true, true);
+    chorusBusBuffer.setSize (2, safeBlock, false, true, true);
+    variationInputBuffer.setSize (2, safeBlock, false, true, true);
+    variationOutputBuffer.setSize (2, safeBlock, false, true, true);
+
+    juce::dsp::ProcessSpec spec { safeSr, static_cast<juce::uint32> (safeBlock), 2 };
+    reverbProcessor.prepare (spec);
+    chorusProcessor.prepare (spec);
+
+    updateReverbSettings();
+    updateChorusSettings();
+
     multiEqFiltersNeedUpdate = true;
     for (auto& chan : multiEqFilters)
         for (auto& f : chan)
             f.reset();
+
+    updateAllPartEqCoefficients();
 }
 
 std::unique_ptr<FluidSynthEngine::SynthInstance> FluidSynthEngine::createSynth (const juce::File& file,
@@ -153,12 +175,18 @@ std::unique_ptr<FluidSynthEngine::SynthInstance> FluidSynthEngine::createSynth (
         return {};
     }
 
+    fluid_settings_setint (instance->settings, "synth.audio-channels", 16);
+    fluid_settings_setint (instance->settings, "synth.effects-channels", 2);
+
     instance->synth = new_fluid_synth (instance->settings);
     if (instance->synth == nullptr)
     {
         errorMessage = "FluidSynth could not create a synthesizer.";
         return {};
     }
+
+    fluid_synth_set_reverb_on (instance->synth, 0);
+    fluid_synth_set_chorus_on (instance->synth, 0);
 
     const auto soundFontId = fluid_synth_sfload (instance->synth,
                                                  file.getFullPathName().toRawUTF8(),
@@ -418,6 +446,8 @@ void FluidSynthEngine::initializeSynthChannelState (SynthInstance& instance) noe
     const auto baseGain = masterGain.load (std::memory_order_acquire);
     const auto volRatio = static_cast<float> (systemParameters.masterVolume) / 127.0f;
     fluid_synth_set_gain (instance.synth, baseGain * volRatio);
+    fluid_synth_set_reverb_on (instance.synth, 0);
+    fluid_synth_set_chorus_on (instance.synth, 0);
 
     updateReverbSettings();
     updateChorusSettings();
@@ -746,138 +776,183 @@ void FluidSynthEngine::updateAllChannelTunings() noexcept
 
 void FluidSynthEngine::updateReverbSettings() noexcept
 {
-    if (activeSynth == nullptr)
-        return;
-
-    if (reverbParameters.typeMsb == 0)
-    {
-        fluid_synth_set_reverb_on (activeSynth->synth, 0);
-        return;
-    }
-
-    fluid_synth_set_reverb_on (activeSynth->synth, 1);
-
-    double baseRoom = 0.6;
+    float baseRoom = 0.6f;
     if (reverbParameters.typeMsb == 0x01 || reverbParameters.typeMsb == 0x02)
-        baseRoom = 0.8;
+        baseRoom = 0.8f;
     else if (reverbParameters.typeMsb >= 0x03 && reverbParameters.typeMsb <= 0x05)
-        baseRoom = 0.45;
+        baseRoom = 0.45f;
     else if (reverbParameters.typeMsb == 0x06 || reverbParameters.typeMsb == 0x07)
-        baseRoom = 0.65;
+        baseRoom = 0.65f;
     else if (reverbParameters.typeMsb == 0x08)
-        baseRoom = 0.55;
+        baseRoom = 0.55f;
 
     const auto timeParam = reverbParameters.parameters[0] > 0 ? reverbParameters.parameters[0] : 64;
-    const auto roomsize = juce::jlimit (0.0, 1.0, baseRoom * (static_cast<double> (timeParam) / 64.0));
+    const auto roomsize = juce::jlimit (0.0f, 1.0f, baseRoom * (static_cast<float> (timeParam) / 64.0f));
 
     const auto dampParam = reverbParameters.parameters[1] > 0 ? reverbParameters.parameters[1] : 64;
-    const auto damping = juce::jlimit (0.0, 1.0, static_cast<double> (dampParam) / 127.0);
+    const auto damping = juce::jlimit (0.0f, 1.0f, static_cast<float> (dampParam) / 127.0f);
 
-    const auto level = juce::jlimit (0.0, 1.0, static_cast<double> (reverbParameters.reverbReturn) / 127.0);
-    const auto width = 1.0;
+    juce::dsp::Reverb::Parameters params;
+    params.roomSize = (reverbParameters.typeMsb == 0) ? 0.0f : roomsize;
+    params.damping = damping;
+    params.wetLevel = (reverbParameters.typeMsb == 0) ? 0.0f : 1.0f;
+    params.dryLevel = 0.0f;
+    params.width = 1.0f;
+    params.freezeMode = 0.0f;
 
-    fluid_synth_set_reverb (activeSynth->synth, roomsize, damping, width, level);
+    reverbProcessor.setParameters (params);
 }
 
 void FluidSynthEngine::updateGsReverbSettings() noexcept
 {
-    if (activeSynth == nullptr)
-        return;
-
-    fluid_synth_set_reverb_on (activeSynth->synth, 1);
-
-    double baseRoom = 0.6;
-    double baseDamp = 0.4;
+    float baseRoom = 0.6f;
+    float baseDamp = 0.4f;
     switch (gsReverbParameters.macro)
     {
-        case 0: baseRoom = 0.25; baseDamp = 0.6; break; // Room 1
-        case 1: baseRoom = 0.35; baseDamp = 0.5; break; // Room 2
-        case 2: baseRoom = 0.45; baseDamp = 0.5; break; // Room 3
-        case 3: baseRoom = 0.65; baseDamp = 0.4; break; // Hall 1
-        case 4: baseRoom = 0.80; baseDamp = 0.3; break; // Hall 2
-        case 5: baseRoom = 0.50; baseDamp = 0.1; break; // Plate
-        case 6: baseRoom = 0.70; baseDamp = 0.2; break; // Delay
-        case 7: baseRoom = 0.70; baseDamp = 0.2; break; // Pan Delay
+        case 0: baseRoom = 0.25f; baseDamp = 0.6f; break; // Room 1
+        case 1: baseRoom = 0.35f; baseDamp = 0.5f; break; // Room 2
+        case 2: baseRoom = 0.45f; baseDamp = 0.5f; break; // Room 3
+        case 3: baseRoom = 0.65f; baseDamp = 0.4f; break; // Hall 1
+        case 4: baseRoom = 0.80f; baseDamp = 0.3f; break; // Hall 2
+        case 5: baseRoom = 0.50f; baseDamp = 0.1f; break; // Plate
+        case 6: baseRoom = 0.70f; baseDamp = 0.2f; break; // Delay
+        case 7: baseRoom = 0.70f; baseDamp = 0.2f; break; // Pan Delay
         default: break;
     }
 
-    const auto timeFactor = static_cast<double> (juce::jlimit (0, 127, static_cast<int> (gsReverbParameters.time))) / 64.0;
-    const auto roomsize = juce::jlimit (0.0, 1.0, baseRoom * timeFactor);
-    const auto damping = juce::jlimit (0.0, 1.0, baseDamp + (static_cast<double> (gsReverbParameters.character) / 14.0));
-    const auto level = juce::jlimit (0.0, 1.0, static_cast<double> (gsReverbParameters.level) / 127.0);
-    const auto width = 1.0;
+    const auto timeFactor = static_cast<float> (juce::jlimit (0, 127, static_cast<int> (gsReverbParameters.time))) / 64.0f;
+    const auto roomsize = juce::jlimit (0.0f, 1.0f, baseRoom * timeFactor);
+    const auto damping = juce::jlimit (0.0f, 1.0f, baseDamp + (static_cast<float> (gsReverbParameters.character) / 14.0f));
 
-    fluid_synth_set_reverb (activeSynth->synth, roomsize, damping, width, level);
+    juce::dsp::Reverb::Parameters params;
+    params.roomSize = roomsize;
+    params.damping = damping;
+    params.wetLevel = 1.0f;
+    params.dryLevel = 0.0f;
+    params.width = 1.0f;
+    params.freezeMode = 0.0f;
+
+    reverbProcessor.setParameters (params);
 }
 
 void FluidSynthEngine::updateGsChorusSettings() noexcept
 {
-    if (activeSynth == nullptr)
-        return;
-
-    if (gsChorusParameters.level == 0)
-    {
-        fluid_synth_set_chorus_on (activeSynth->synth, 0);
-        return;
-    }
-
-    fluid_synth_set_chorus_on (activeSynth->synth, 1);
-
-    int nr = 2;
-    double speed = 1.0;
-    double depth_ms = 0.08;
-    int type = 0;
+    float rateHz = 1.0f;
+    float depthNorm = 0.25f;
+    float feedback = 0.0f;
+    float delayMs = 7.0f;
 
     switch (gsChorusParameters.macro)
     {
-        case 0: nr = 2; speed = 0.80; depth_ms = 0.05; type = 0; break; // Chorus 1 (Subtle / Clean)
-        case 1: nr = 2; speed = 0.90; depth_ms = 0.07; type = 0; break; // Chorus 2
-        case 2: nr = 2; speed = 1.00; depth_ms = 0.08; type = 0; break; // Chorus 3 (Default)
-        case 3: nr = 3; speed = 1.20; depth_ms = 0.10; type = 0; break; // Chorus 4 (Rich)
-        case 4: nr = 2; speed = 0.90; depth_ms = 0.07; type = 0; break; // FB Chorus
-        case 5: nr = 2; speed = 0.50; depth_ms = 0.12; type = 1; break; // Flanger
-        case 6: nr = 1; speed = 0.30; depth_ms = 0.02; type = 0; break; // Short Delay
-        case 7: nr = 1; speed = 0.30; depth_ms = 0.02; type = 0; break; // Short Delay FB
+        case 0: rateHz = 0.8f; depthNorm = 0.2f; delayMs = 5.0f; break; // Chorus 1
+        case 1: rateHz = 0.9f; depthNorm = 0.25f; delayMs = 6.0f; break; // Chorus 2
+        case 2: rateHz = 1.0f; depthNorm = 0.3f; delayMs = 7.0f; break; // Chorus 3
+        case 3: rateHz = 1.2f; depthNorm = 0.4f; delayMs = 8.0f; break; // Chorus 4
+        case 4: rateHz = 0.9f; depthNorm = 0.3f; feedback = 0.4f; delayMs = 7.0f; break; // FB Chorus
+        case 5: rateHz = 0.5f; depthNorm = 0.5f; feedback = 0.7f; delayMs = 2.0f; break; // Flanger
+        case 6: rateHz = 0.2f; depthNorm = 0.1f; delayMs = 15.0f; break; // Short Delay
+        case 7: rateHz = 0.2f; depthNorm = 0.1f; feedback = 0.4f; delayMs = 15.0f; break; // Short Delay FB
         default: break;
     }
 
     if (gsChorusParameters.rate > 0)
     {
-        const auto speedNorm = static_cast<double> (gsChorusParameters.rate) / 127.0;
-        speed = juce::jlimit (0.6, 2.0, 0.6 + speedNorm * 1.4);
+        const auto speedNorm = static_cast<float> (gsChorusParameters.rate) / 127.0f;
+        rateHz = juce::jlimit (0.2f, 8.0f, 0.4f + speedNorm * 5.0f);
     }
     if (gsChorusParameters.depth > 0)
     {
-        depth_ms = juce::jlimit (0.01, 0.15, (static_cast<double> (gsChorusParameters.depth) / 127.0) * 0.12);
+        depthNorm = juce::jlimit (0.0f, 1.0f, static_cast<float> (gsChorusParameters.depth) / 127.0f);
+    }
+    if (gsChorusParameters.feedback > 0)
+    {
+        feedback = juce::jlimit (-0.85f, 0.85f, static_cast<float> (gsChorusParameters.feedback) / 127.0f * 0.8f);
     }
 
-    const auto level = juce::jlimit (0.0, 0.25, static_cast<double> (gsChorusParameters.level) / 127.0 * 0.20);
-    fluid_synth_set_chorus (activeSynth->synth, nr, level, speed, depth_ms, type);
+    chorusProcessor.setRate (rateHz);
+    chorusProcessor.setDepth (depthNorm);
+    chorusProcessor.setCentreDelay (delayMs);
+    chorusProcessor.setFeedback (feedback);
+    chorusProcessor.setMix (gsChorusParameters.level > 0 ? 1.0f : 0.0f);
 }
 
 void FluidSynthEngine::updateChorusSettings() noexcept
 {
-    if (activeSynth == nullptr)
+    const auto speedParam = chorusParameters.parameters[0] > 0 ? chorusParameters.parameters[0] : 64;
+    const auto speedNorm = static_cast<float> (speedParam) / 127.0f;
+    const auto rateHz = juce::jlimit (0.1f, 10.0f, 0.2f + speedNorm * speedNorm * 4.0f);
+
+    const auto depthParam = chorusParameters.parameters[1] > 0 ? chorusParameters.parameters[1] : 64;
+    const auto depthNorm = juce::jlimit (0.0f, 1.0f, static_cast<float> (depthParam) / 127.0f);
+
+    const auto fbParam = chorusParameters.parameters[2];
+    const auto feedback = juce::jlimit (-0.85f, 0.85f, static_cast<float> (fbParam - 64) / 64.0f * 0.7f);
+
+    const auto delayParam = chorusParameters.parameters[3] > 0 ? chorusParameters.parameters[3] : 64;
+    const auto delayMs = juce::jlimit (1.0f, 50.0f, static_cast<float> (delayParam) / 127.0f * 30.0f + 5.0f);
+
+    chorusProcessor.setRate (rateHz);
+    chorusProcessor.setDepth (depthNorm);
+    chorusProcessor.setCentreDelay (delayMs);
+    chorusProcessor.setFeedback (feedback);
+    chorusProcessor.setMix (chorusParameters.typeMsb > 0 ? 1.0f : 0.0f);
+}
+
+void FluidSynthEngine::updatePartEqCoefficients (int channel) noexcept
+{
+    if (! juce::isPositiveAndBelow (channel, numMidiChannels))
         return;
 
-    if (chorusParameters.typeMsb == 0)
-    {
-        fluid_synth_set_chorus_on (activeSynth->synth, 0);
+    const auto sr = currentSampleRate.load (std::memory_order_relaxed);
+    if (sr <= 1.0)
         return;
+
+    const auto nyquist = sr * 0.49;
+    const auto index = static_cast<size_t> (channel);
+    auto& eq = partEqs[index];
+    const auto& p = partParameters[index];
+
+    // Bass
+    const auto bassGainDb = static_cast<float> (p.eqBass - 64);
+    if (std::abs (bassGainDb) < 0.1f)
+    {
+        eq.bassActive = false;
+        eq.bassFilters[0].makeInactive();
+        eq.bassFilters[1].makeInactive();
+    }
+    else
+    {
+        const auto bassGainFactor = juce::Decibels::decibelsToGain (bassGainDb);
+        const auto bassFreq = juce::jlimit (20.0, nyquist, static_cast<double> (xg::lookupEqFrequency (p.eqBassFreq)));
+        const auto bassCoeff = juce::IIRCoefficients::makeLowShelf (sr, bassFreq, 0.707, bassGainFactor);
+        eq.bassFilters[0].setCoefficients (bassCoeff);
+        eq.bassFilters[1].setCoefficients (bassCoeff);
+        eq.bassActive = true;
     }
 
-    fluid_synth_set_chorus_on (activeSynth->synth, 1);
+    // Treble
+    const auto trebleGainDb = static_cast<float> (p.eqTreble - 64);
+    if (std::abs (trebleGainDb) < 0.1f)
+    {
+        eq.trebleActive = false;
+        eq.trebleFilters[0].makeInactive();
+        eq.trebleFilters[1].makeInactive();
+    }
+    else
+    {
+        const auto trebleGainFactor = juce::Decibels::decibelsToGain (trebleGainDb);
+        const auto trebleFreq = juce::jlimit (20.0, nyquist, static_cast<double> (xg::lookupEqFrequency (p.eqTrebleFreq)));
+        const auto trebleCoeff = juce::IIRCoefficients::makeHighShelf (sr, trebleFreq, 0.707, trebleGainFactor);
+        eq.trebleFilters[0].setCoefficients (trebleCoeff);
+        eq.trebleFilters[1].setCoefficients (trebleCoeff);
+        eq.trebleActive = true;
+    }
+}
 
-    const auto nr = (chorusParameters.typeMsb >= 0x48) ? 3 : 2;
-    const auto level = juce::jlimit (0.0, 1.0, static_cast<double> (chorusParameters.chorusReturn) / 64.0 * 0.35);
-    const auto speedParam = chorusParameters.parameters[0] > 0 ? chorusParameters.parameters[0] : 64;
-    const auto speedNorm = static_cast<double> (speedParam) / 127.0;
-    const auto speed = juce::jlimit (0.1, 2.0, 0.15 + std::pow (speedNorm, 2.0) * 0.9);
-    const auto depthParam = chorusParameters.parameters[1] > 0 ? chorusParameters.parameters[1] : 64;
-    const auto depth_ms = juce::jlimit (0.0, 0.8, (static_cast<double> (depthParam) / 127.0) * 0.6);
-    const auto type = 0;
-
-    fluid_synth_set_chorus (activeSynth->synth, nr, level, speed, depth_ms, type);
+void FluidSynthEngine::updateAllPartEqCoefficients() noexcept
+{
+    for (int ch = 0; ch < numMidiChannels; ++ch)
+        updatePartEqCoefficients (ch);
 }
 
 void FluidSynthEngine::updateMultiEqCoefficients() noexcept
@@ -967,6 +1042,8 @@ void FluidSynthEngine::resetChannelState (int channel) noexcept
 
     partParameters[index].reset();
     gsPartParameters[index].reset (channel);
+    partEqs[index].reset();
+    updatePartEqCoefficients (channel);
     nrpnStates[index].reset();
     for (size_t n = 0; n < 128; ++n)
         activeNoteTransposition[index][n] = static_cast<uint8_t> (n);
@@ -1685,18 +1762,22 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
 
                 case 0x72: // EQ Bass Gain
                     p.eqBass = juce::jlimit (0, 127, static_cast<int> (val));
+                    partEqs[chIdx].needsUpdate = true;
                     break;
 
                 case 0x73: // EQ Treble Gain
                     p.eqTreble = juce::jlimit (0, 127, static_cast<int> (val));
+                    partEqs[chIdx].needsUpdate = true;
                     break;
 
                 case 0x76: // EQ Bass Frequency
                     p.eqBassFreq = juce::jlimit (0, 127, static_cast<int> (val));
+                    partEqs[chIdx].needsUpdate = true;
                     break;
 
                 case 0x77: // EQ Treble Frequency
                     p.eqTrebleFreq = juce::jlimit (0, 127, static_cast<int> (val));
+                    partEqs[chIdx].needsUpdate = true;
                     break;
 
                 default:
@@ -2317,10 +2398,10 @@ void FluidSynthEngine::handleNrpnDataEntry (int channel, int value, bool isMsb) 
                 case 0x0A: setPartVibratoDelay (channel, value); break;
                 case 0x20: setPartFilterCutoff (channel, value); break;
                 case 0x21: setPartFilterResonance (channel, value); break;
-                case 0x30: partParameters[index].eqBass = juce::jlimit (0, 127, value); break;
-                case 0x31: partParameters[index].eqTreble = juce::jlimit (0, 127, value); break;
-                case 0x34: partParameters[index].eqBassFreq = juce::jlimit (0, 127, value); break;
-                case 0x35: partParameters[index].eqTrebleFreq = juce::jlimit (0, 127, value); break;
+                case 0x30: partParameters[index].eqBass = juce::jlimit (0, 127, value); partEqs[index].needsUpdate = true; break;
+                case 0x31: partParameters[index].eqTreble = juce::jlimit (0, 127, value); partEqs[index].needsUpdate = true; break;
+                case 0x34: partParameters[index].eqBassFreq = juce::jlimit (0, 127, value); partEqs[index].needsUpdate = true; break;
+                case 0x35: partParameters[index].eqTrebleFreq = juce::jlimit (0, 127, value); partEqs[index].needsUpdate = true; break;
                 case 0x63: setPartEgAttack (channel, value); break;
                 case 0x64: setPartEgDecay (channel, value); break;
                 case 0x66: setPartEgRelease (channel, value); break;
@@ -2409,10 +2490,10 @@ void FluidSynthEngine::handleNrpnDataIncDec (int channel, int delta) noexcept
                 case 0x0A: setPartVibratoDelay (channel, p.vibratoDelay + delta); break;
                 case 0x20: setPartFilterCutoff (channel, p.filterCutoff + delta); break;
                 case 0x21: setPartFilterResonance (channel, p.filterResonance + delta); break;
-                case 0x30: partParameters[index].eqBass = juce::jlimit (0, 127, p.eqBass + delta); break;
-                case 0x31: partParameters[index].eqTreble = juce::jlimit (0, 127, p.eqTreble + delta); break;
-                case 0x34: partParameters[index].eqBassFreq = juce::jlimit (0, 127, p.eqBassFreq + delta); break;
-                case 0x35: partParameters[index].eqTrebleFreq = juce::jlimit (0, 127, p.eqTrebleFreq + delta); break;
+                case 0x30: partParameters[index].eqBass = juce::jlimit (0, 127, p.eqBass + delta); partEqs[index].needsUpdate = true; break;
+                case 0x31: partParameters[index].eqTreble = juce::jlimit (0, 127, p.eqTreble + delta); partEqs[index].needsUpdate = true; break;
+                case 0x34: partParameters[index].eqBassFreq = juce::jlimit (0, 127, p.eqBassFreq + delta); partEqs[index].needsUpdate = true; break;
+                case 0x35: partParameters[index].eqTrebleFreq = juce::jlimit (0, 127, p.eqTrebleFreq + delta); partEqs[index].needsUpdate = true; break;
                 case 0x63: setPartEgAttack (channel, p.egAttack + delta); break;
                 case 0x64: setPartEgDecay (channel, p.egDecay + delta); break;
                 case 0x66: setPartEgRelease (channel, p.egRelease + delta); break;
@@ -3178,14 +3259,9 @@ void FluidSynthEngine::renderRange (const juce::MidiBuffer& midiMessages,
         const auto eventPosition = juce::jmax (rangeStart, metadata.samplePosition);
         if (eventPosition > renderedUntil)
         {
-            fluid_synth_write_float (activeSynth->synth,
-                                     eventPosition - renderedUntil,
-                                     left + (renderedUntil - rangeStart),
-                                     0,
-                                     1,
-                                     right + (renderedUntil - rangeStart),
-                                     0,
-                                     1);
+            renderSubRange (eventPosition - renderedUntil,
+                            left + (renderedUntil - rangeStart),
+                            right + (renderedUntil - rangeStart));
             renderedUntil = eventPosition;
         }
 
@@ -3202,14 +3278,255 @@ void FluidSynthEngine::renderRange (const juce::MidiBuffer& midiMessages,
 
     if (renderedUntil < rangeEnd)
     {
-        fluid_synth_write_float (activeSynth->synth,
-                                 rangeEnd - renderedUntil,
-                                 left + (renderedUntil - rangeStart),
-                                 0,
-                                 1,
-                                 right + (renderedUntil - rangeStart),
-                                 0,
-                                 1);
+        renderSubRange (rangeEnd - renderedUntil,
+                        left + (renderedUntil - rangeStart),
+                        right + (renderedUntil - rangeStart));
+    }
+}
+
+void FluidSynthEngine::renderSubRange (int totalSamples, float* destLeft, float* destRight) noexcept
+{
+    if (activeSynth == nullptr || totalSamples <= 0 || destLeft == nullptr || destRight == nullptr)
+        return;
+
+    const auto maxChunk = multiPartBuffer.getNumSamples();
+    if (maxChunk <= 0)
+        return;
+
+    const auto activeMode = getActiveMode();
+    const bool isXg = (activeMode == ActiveMode::XG);
+    const bool isGs = (activeMode == ActiveMode::GS);
+    const bool varIsInsertion = isXg && (variationParameters.connection == 0);
+    const int varTargetPart = static_cast<int> (variationParameters.part);
+
+    int samplesRendered = 0;
+    while (samplesRendered < totalSamples)
+    {
+        const auto chunkSize = juce::jmin (maxChunk, totalSamples - samplesRendered);
+        auto* curDestLeft = destLeft + samplesRendered;
+        auto* curDestRight = destRight + samplesRendered;
+
+        for (int ch = 0; ch < numMidiChannels; ++ch)
+        {
+            partLeftPtrs[static_cast<size_t> (ch)] = multiPartBuffer.getWritePointer (ch * 2);
+            partRightPtrs[static_cast<size_t> (ch)] = multiPartBuffer.getWritePointer (ch * 2 + 1);
+            juce::FloatVectorOperations::clear (partLeftPtrs[static_cast<size_t> (ch)], chunkSize);
+            juce::FloatVectorOperations::clear (partRightPtrs[static_cast<size_t> (ch)], chunkSize);
+        }
+
+        fluid_synth_nwrite_float (activeSynth->synth,
+                                  chunkSize,
+                                  partLeftPtrs.data(),
+                                  partRightPtrs.data(),
+                                  nullptr,
+                                  nullptr);
+
+        // Mute handling
+        for (int ch = 0; ch < numMidiChannels; ++ch)
+        {
+            if (channelMuted[static_cast<size_t> (ch)].load (std::memory_order_relaxed))
+            {
+                juce::FloatVectorOperations::clear (partLeftPtrs[static_cast<size_t> (ch)], chunkSize);
+                juce::FloatVectorOperations::clear (partRightPtrs[static_cast<size_t> (ch)], chunkSize);
+            }
+        }
+
+        // 1. Part EQ on each channel
+        for (int ch = 0; ch < numMidiChannels; ++ch)
+        {
+            auto& eq = partEqs[static_cast<size_t> (ch)];
+            if (eq.needsUpdate)
+            {
+                updatePartEqCoefficients (ch);
+                eq.needsUpdate = false;
+            }
+
+            if (eq.bassActive)
+            {
+                eq.bassFilters[0].processSamples (partLeftPtrs[static_cast<size_t> (ch)], chunkSize);
+                eq.bassFilters[1].processSamples (partRightPtrs[static_cast<size_t> (ch)], chunkSize);
+            }
+            if (eq.trebleActive)
+            {
+                eq.trebleFilters[0].processSamples (partLeftPtrs[static_cast<size_t> (ch)], chunkSize);
+                eq.trebleFilters[1].processSamples (partRightPtrs[static_cast<size_t> (ch)], chunkSize);
+            }
+        }
+
+        // 2. Variation Effect (Insertion or System)
+        variationInputBuffer.clear (0, 0, chunkSize);
+        variationInputBuffer.clear (1, 0, chunkSize);
+        variationOutputBuffer.clear (0, 0, chunkSize);
+        variationOutputBuffer.clear (1, 0, chunkSize);
+
+        if (varIsInsertion && juce::isPositiveAndBelow (varTargetPart, numMidiChannels))
+        {
+            const auto partIdx = static_cast<size_t> (varTargetPart);
+            variationInputBuffer.copyFrom (0, 0, multiPartBuffer, static_cast<int> (partIdx * 2), 0, chunkSize);
+            variationInputBuffer.copyFrom (1, 0, multiPartBuffer, static_cast<int> (partIdx * 2 + 1), 0, chunkSize);
+
+            // Variation processor: Thru for now
+            variationOutputBuffer.copyFrom (0, 0, variationInputBuffer, 0, 0, chunkSize);
+            variationOutputBuffer.copyFrom (1, 0, variationInputBuffer, 1, 0, chunkSize);
+
+            // Replace channel audio with Variation output
+            multiPartBuffer.copyFrom (static_cast<int> (partIdx * 2), 0, variationOutputBuffer, 0, 0, chunkSize);
+            multiPartBuffer.copyFrom (static_cast<int> (partIdx * 2 + 1), 0, variationOutputBuffer, 1, 0, chunkSize);
+        }
+        else if (isXg && variationParameters.connection == 1)
+        {
+            // System mode: accumulate variation sends from all parts
+            for (int ch = 0; ch < numMidiChannels; ++ch)
+            {
+                const auto vSend = static_cast<float> (partParameters[static_cast<size_t> (ch)].variationSend) / 127.0f;
+                if (vSend > 0.0f)
+                {
+                    variationInputBuffer.addFrom (0, 0, multiPartBuffer, ch * 2, 0, chunkSize, vSend);
+                    variationInputBuffer.addFrom (1, 0, multiPartBuffer, ch * 2 + 1, 0, chunkSize, vSend);
+                }
+            }
+
+            // Variation processor: Thru for now
+            variationOutputBuffer.copyFrom (0, 0, variationInputBuffer, 0, 0, chunkSize);
+            variationOutputBuffer.copyFrom (1, 0, variationInputBuffer, 1, 0, chunkSize);
+        }
+
+        // 3. Chorus Bus Accumulation & Processing
+        chorusBusBuffer.clear (0, 0, chunkSize);
+        chorusBusBuffer.clear (1, 0, chunkSize);
+
+        for (int ch = 0; ch < numMidiChannels; ++ch)
+        {
+            const auto cSend = static_cast<float> (partParameters[static_cast<size_t> (ch)].chorusSend) / 127.0f;
+            if (cSend > 0.0f)
+            {
+                chorusBusBuffer.addFrom (0, 0, multiPartBuffer, ch * 2, 0, chunkSize, cSend);
+                chorusBusBuffer.addFrom (1, 0, multiPartBuffer, ch * 2 + 1, 0, chunkSize, cSend);
+            }
+        }
+        if (isXg && variationParameters.connection == 1)
+        {
+            const auto varToChorus = static_cast<float> (variationParameters.sendToChorus) / 127.0f;
+            if (varToChorus > 0.0f)
+            {
+                chorusBusBuffer.addFrom (0, 0, variationOutputBuffer, 0, 0, chunkSize, varToChorus);
+                chorusBusBuffer.addFrom (1, 0, variationOutputBuffer, 1, 0, chunkSize, varToChorus);
+            }
+        }
+
+        juce::dsp::AudioBlock<float> chorusBlock (chorusBusBuffer);
+        auto subChorusBlock = chorusBlock.getSubBlock (0, static_cast<size_t> (chunkSize));
+        juce::dsp::ProcessContextReplacing<float> chorusContext (subChorusBlock);
+        chorusProcessor.process (chorusContext);
+
+        // 4. Reverb Bus Accumulation & Processing
+        reverbBusBuffer.clear (0, 0, chunkSize);
+        reverbBusBuffer.clear (1, 0, chunkSize);
+
+        for (int ch = 0; ch < numMidiChannels; ++ch)
+        {
+            const auto rSend = static_cast<float> (partParameters[static_cast<size_t> (ch)].reverbSend) / 127.0f;
+            if (rSend > 0.0f)
+            {
+                reverbBusBuffer.addFrom (0, 0, multiPartBuffer, ch * 2, 0, chunkSize, rSend);
+                reverbBusBuffer.addFrom (1, 0, multiPartBuffer, ch * 2 + 1, 0, chunkSize, rSend);
+            }
+        }
+        const auto chorusToReverb = isXg ? (static_cast<float> (chorusParameters.sendToReverb) / 127.0f) : 0.0f;
+        if (chorusToReverb > 0.0f)
+        {
+            reverbBusBuffer.addFrom (0, 0, chorusBusBuffer, 0, 0, chunkSize, chorusToReverb);
+            reverbBusBuffer.addFrom (1, 0, chorusBusBuffer, 1, 0, chunkSize, chorusToReverb);
+        }
+        if (isXg && variationParameters.connection == 1)
+        {
+            const auto varToReverb = static_cast<float> (variationParameters.sendToReverb) / 127.0f;
+            if (varToReverb > 0.0f)
+            {
+                reverbBusBuffer.addFrom (0, 0, variationOutputBuffer, 0, 0, chunkSize, varToReverb);
+                reverbBusBuffer.addFrom (1, 0, variationOutputBuffer, 1, 0, chunkSize, varToReverb);
+            }
+        }
+
+        juce::dsp::AudioBlock<float> reverbBlock (reverbBusBuffer);
+        auto subReverbBlock = reverbBlock.getSubBlock (0, static_cast<size_t> (chunkSize));
+        juce::dsp::ProcessContextReplacing<float> reverbContext (subReverbBlock);
+        reverbProcessor.process (reverbContext);
+
+        // 5. Master Summing
+        juce::FloatVectorOperations::clear (curDestLeft, chunkSize);
+        juce::FloatVectorOperations::clear (curDestRight, chunkSize);
+
+        for (int ch = 0; ch < numMidiChannels; ++ch)
+        {
+            const auto dryLevel = static_cast<float> (partParameters[static_cast<size_t> (ch)].dryLevel) / 127.0f;
+            juce::FloatVectorOperations::addWithMultiply (curDestLeft,
+                                                          partLeftPtrs[static_cast<size_t> (ch)],
+                                                          dryLevel,
+                                                          chunkSize);
+            juce::FloatVectorOperations::addWithMultiply (curDestRight,
+                                                          partRightPtrs[static_cast<size_t> (ch)],
+                                                          dryLevel,
+                                                          chunkSize);
+        }
+
+        // Chorus Return
+        const auto cReturn = isXg ? (static_cast<float> (chorusParameters.chorusReturn) / 64.0f)
+                                  : (isGs ? (static_cast<float> (gsChorusParameters.level) / 127.0f) : 1.0f);
+        if (cReturn > 0.0f)
+        {
+            const auto cPan = isXg ? (static_cast<float> (chorusParameters.chorusPan) / 127.0f) : 0.5f;
+            const auto cGainL = cReturn * std::cos (cPan * 1.5707963f) * 1.4142f;
+            const auto cGainR = cReturn * std::sin (cPan * 1.5707963f) * 1.4142f;
+            juce::FloatVectorOperations::addWithMultiply (curDestLeft,
+                                                          chorusBusBuffer.getReadPointer (0),
+                                                          cGainL,
+                                                          chunkSize);
+            juce::FloatVectorOperations::addWithMultiply (curDestRight,
+                                                          chorusBusBuffer.getReadPointer (1),
+                                                          cGainR,
+                                                          chunkSize);
+        }
+
+        // Reverb Return
+        const auto rReturn = isXg ? (static_cast<float> (reverbParameters.reverbReturn) / 64.0f)
+                                  : (isGs ? (static_cast<float> (gsReverbParameters.level) / 127.0f) : 1.0f);
+        if (rReturn > 0.0f)
+        {
+            const auto rPan = isXg ? (static_cast<float> (reverbParameters.reverbPan) / 127.0f) : 0.5f;
+            const auto rGainL = rReturn * std::cos (rPan * 1.5707963f) * 1.4142f;
+            const auto rGainR = rReturn * std::sin (rPan * 1.5707963f) * 1.4142f;
+            juce::FloatVectorOperations::addWithMultiply (curDestLeft,
+                                                          reverbBusBuffer.getReadPointer (0),
+                                                          rGainL,
+                                                          chunkSize);
+            juce::FloatVectorOperations::addWithMultiply (curDestRight,
+                                                          reverbBusBuffer.getReadPointer (1),
+                                                          rGainR,
+                                                          chunkSize);
+        }
+
+        // Variation Return (System mode only)
+        if (isXg && variationParameters.connection == 1)
+        {
+            const auto vReturn = static_cast<float> (variationParameters.varReturn) / 64.0f;
+            if (vReturn > 0.0f)
+            {
+                const auto vPan = static_cast<float> (variationParameters.varPan) / 127.0f;
+                const auto vGainL = vReturn * std::cos (vPan * 1.5707963f) * 1.4142f;
+                const auto vGainR = vReturn * std::sin (vPan * 1.5707963f) * 1.4142f;
+                juce::FloatVectorOperations::addWithMultiply (curDestLeft,
+                                                              variationOutputBuffer.getReadPointer (0),
+                                                              vGainL,
+                                                              chunkSize);
+                juce::FloatVectorOperations::addWithMultiply (curDestRight,
+                                                              variationOutputBuffer.getReadPointer (1),
+                                                              vGainR,
+                                                              chunkSize);
+            }
+        }
+
+        samplesRendered += chunkSize;
     }
 }
 
