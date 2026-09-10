@@ -4,6 +4,7 @@
 #include <fluidsynth.h>
 #include "XgModel.h"
 #include "GsModel.h"
+#include "VariationEffect.h"
 
 #include <array>
 #include <atomic>
@@ -277,6 +278,7 @@ private:
 
     juce::dsp::Reverb reverbProcessor;
     juce::dsp::Chorus<float> chorusProcessor;
+    VariationEffectProcessor variationProcessor;
 
     juce::AudioBuffer<float> multiPartBuffer;
     std::array<float*, numMidiChannels> partLeftPtrs {};

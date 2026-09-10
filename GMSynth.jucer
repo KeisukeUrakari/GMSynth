@@ -20,6 +20,10 @@
             file="Source/FluidSynthEngine.cpp"/>
       <FILE id="fseHdr1" name="FluidSynthEngine.h" compile="0" resource="0"
             file="Source/FluidSynthEngine.h"/>
+      <FILE id="varCpp1" name="VariationEffect.cpp" compile="1" resource="0"
+            file="Source/VariationEffect.cpp"/>
+      <FILE id="varHdr1" name="VariationEffect.h" compile="0" resource="0"
+            file="Source/VariationEffect.h"/>
       <FILE id="secCpp1" name="SecurityScopedFile.mm" compile="1" resource="0"
             file="Source/SecurityScopedFile.mm"/>
       <FILE id="secHdr1" name="SecurityScopedFile.h" compile="0" resource="0"

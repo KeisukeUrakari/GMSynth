@@ -94,6 +94,8 @@ FluidSynthEngine::FluidSynthEngine()
     reverbParameters.reset();
     chorusParameters.reset();
     variationParameters.reset();
+    variationProcessor.reset();
+    variationProcessor.updateParameters (variationParameters);
     multiEqParameters.reset();
     multiEqFiltersNeedUpdate = true;
     for (auto& chan : multiEqFilters)
@@ -144,9 +146,11 @@ void FluidSynthEngine::prepare (double sampleRate, int samplesPerBlock)
     juce::dsp::ProcessSpec spec { safeSr, static_cast<juce::uint32> (safeBlock), 2 };
     reverbProcessor.prepare (spec);
     chorusProcessor.prepare (spec);
+    variationProcessor.prepare (safeSr, safeBlock);
 
     updateReverbSettings();
     updateChorusSettings();
+    variationProcessor.updateParameters (variationParameters);
 
     multiEqFiltersNeedUpdate = true;
     for (auto& chan : multiEqFilters)
@@ -1397,6 +1401,8 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
         gsChorusParameters.reset();
         gsDelayParameters.reset();
         variationParameters.reset();
+        variationProcessor.reset();
+        variationProcessor.updateParameters (variationParameters);
         multiEqParameters.reset();
         multiEqFiltersNeedUpdate = true;
         for (auto& chan : multiEqFilters)
@@ -1462,6 +1468,8 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
             reverbParameters.reset();
             chorusParameters.reset();
             variationParameters.reset();
+            variationProcessor.reset();
+            variationProcessor.updateParameters (variationParameters);
             multiEqParameters.reset();
             multiEqFiltersNeedUpdate = true;
             for (auto& chan : multiEqFilters)
@@ -1496,6 +1504,8 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
             reverbParameters.reset();
             chorusParameters.reset();
             variationParameters.reset();
+            variationProcessor.reset();
+            variationProcessor.updateParameters (variationParameters);
             multiEqParameters.reset();
             multiEqFiltersNeedUpdate = true;
             for (auto& chan : multiEqFilters)
@@ -1838,6 +1848,7 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
     {
         bool reverbChanged = false;
         bool chorusChanged = false;
+        bool variationChanged = false;
 
         for (int i = 0; i < numData; ++i)
         {
@@ -1914,10 +1925,12 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
             else if (curAddr == 0x40)
             {
                 variationParameters.typeMsb = val;
+                variationChanged = true;
             }
             else if (curAddr == 0x41)
             {
                 variationParameters.typeLsb = val;
+                variationChanged = true;
             }
             else if (curAddr >= 0x42 && curAddr <= 0x55)
             {
@@ -1929,6 +1942,7 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
                         variationParameters.parameters14Bit[paramIdx] = static_cast<uint16_t> ((variationParameters.parameters14Bit[paramIdx] & 0x3f80) | (val & 0x7f));
                     else
                         variationParameters.parameters14Bit[paramIdx] = static_cast<uint16_t> ((variationParameters.parameters14Bit[paramIdx] & 0x007f) | ((val & 0x7f) << 7));
+                    variationChanged = true;
                 }
             }
             else if (curAddr == 0x56)
@@ -1978,6 +1992,7 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
             else if (curAddr >= 0x70 && curAddr <= 0x75)
             {
                 variationParameters.parameters11To16[static_cast<size_t> (curAddr - 0x70)] = val;
+                variationChanged = true;
             }
         }
 
@@ -1986,6 +2001,9 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
 
         if (chorusChanged)
             updateChorusSettings();
+
+        if (variationChanged)
+            variationProcessor.updateParameters (variationParameters);
 
         return;
     }
@@ -3365,9 +3383,7 @@ void FluidSynthEngine::renderSubRange (int totalSamples, float* destLeft, float*
             variationInputBuffer.copyFrom (0, 0, multiPartBuffer, static_cast<int> (partIdx * 2), 0, chunkSize);
             variationInputBuffer.copyFrom (1, 0, multiPartBuffer, static_cast<int> (partIdx * 2 + 1), 0, chunkSize);
 
-            // Variation processor: Thru for now
-            variationOutputBuffer.copyFrom (0, 0, variationInputBuffer, 0, 0, chunkSize);
-            variationOutputBuffer.copyFrom (1, 0, variationInputBuffer, 1, 0, chunkSize);
+            variationProcessor.process (variationInputBuffer, variationOutputBuffer, chunkSize);
 
             // Replace channel audio with Variation output
             multiPartBuffer.copyFrom (static_cast<int> (partIdx * 2), 0, variationOutputBuffer, 0, 0, chunkSize);
@@ -3386,9 +3402,7 @@ void FluidSynthEngine::renderSubRange (int totalSamples, float* destLeft, float*
                 }
             }
 
-            // Variation processor: Thru for now
-            variationOutputBuffer.copyFrom (0, 0, variationInputBuffer, 0, 0, chunkSize);
-            variationOutputBuffer.copyFrom (1, 0, variationInputBuffer, 1, 0, chunkSize);
+            variationProcessor.process (variationInputBuffer, variationOutputBuffer, chunkSize);
         }
 
         // 3. Chorus Bus Accumulation & Processing
