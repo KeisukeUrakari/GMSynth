@@ -137,7 +137,12 @@ void FluidSynthEngine::prepare (double sampleRate, int samplesPerBlock)
     currentSampleRate.store (safeSr, std::memory_order_release);
     scratchBuffer.setSize (2, safeBlock, false, true, true);
 
-    multiPartBuffer.setSize (numMidiChannels * 2, safeBlock, false, true, true);
+    multiPartBuffer.setSize (totalSynthChannels * 2, safeBlock, false, true, true);
+    for (auto& slot : auxDrumSlots)
+        slot.reset();
+    auxChannelBank.fill (-1);
+    auxChannelProgram.fill (-1);
+
     reverbBusBuffer.setSize (2, safeBlock, false, true, true);
     chorusBusBuffer.setSize (2, safeBlock, false, true, true);
     variationInputBuffer.setSize (2, safeBlock, false, true, true);
@@ -179,7 +184,8 @@ std::unique_ptr<FluidSynthEngine::SynthInstance> FluidSynthEngine::createSynth (
         return {};
     }
 
-    fluid_settings_setint (instance->settings, "synth.audio-channels", 16);
+    fluid_settings_setint (instance->settings, "synth.audio-channels", totalSynthChannels);
+    fluid_settings_setint (instance->settings, "synth.midi-channels", totalSynthChannels);
     fluid_settings_setint (instance->settings, "synth.effects-channels", 2);
 
     instance->synth = new_fluid_synth (instance->settings);
@@ -323,7 +329,7 @@ void FluidSynthEngine::applyProgramChangeToSynth (SynthInstance& instance,
                                                    bool isPercussionChannel) noexcept
 {
     if (instance.synth == nullptr
-        || ! juce::isPositiveAndBelow (channel, numMidiChannels)
+        || ! juce::isPositiveAndBelow (channel, static_cast<int> (totalSynthChannels))
         || ! juce::isPositiveAndBelow (program, 128))
         return;
 
@@ -2707,6 +2713,180 @@ void FluidSynthEngine::handleNrpnDataIncDec (int channel, int delta) noexcept
     }
 }
 
+int FluidSynthEngine::allocateAuxDrumSlot (int channel, int noteNumber, int setupIdx) noexcept
+{
+    const auto now = ++auxDrumTimestamp;
+
+    // 1. First priority: completely inactive slot
+    for (size_t i = 0; i < numAuxDrumChannels; ++i)
+    {
+        if (! auxDrumSlots[i].active)
+        {
+            auxDrumSlots[i].reset();
+            auxDrumSlots[i].active = true;
+            auxDrumSlots[i].sourceChannel = channel;
+            auxDrumSlots[i].noteNumber = noteNumber;
+            auxDrumSlots[i].setupIndex = setupIdx;
+            auxDrumSlots[i].triggerTime = now;
+            return static_cast<int> (i);
+        }
+    }
+
+    // 2. Second priority: slot that has decayed to silence
+    for (size_t i = 0; i < numAuxDrumChannels; ++i)
+    {
+        if (auxDrumSlots[i].silentBlocks >= 4)
+        {
+            const auto auxChan = numMidiChannels + static_cast<int> (i);
+            if (activeSynth != nullptr)
+                fluid_synth_all_notes_off (activeSynth->synth, auxChan);
+
+            auxDrumSlots[i].reset();
+            auxDrumSlots[i].active = true;
+            auxDrumSlots[i].sourceChannel = channel;
+            auxDrumSlots[i].noteNumber = noteNumber;
+            auxDrumSlots[i].setupIndex = setupIdx;
+            auxDrumSlots[i].triggerTime = now;
+            return static_cast<int> (i);
+        }
+    }
+
+    // 3. Third priority: LRU (Least Recently Used) slot
+    size_t oldestIdx = 0;
+    uint64_t oldestTime = UINT64_MAX;
+    for (size_t i = 0; i < numAuxDrumChannels; ++i)
+    {
+        if (auxDrumSlots[i].triggerTime < oldestTime)
+        {
+            oldestTime = auxDrumSlots[i].triggerTime;
+            oldestIdx = i;
+        }
+    }
+
+    const auto auxChan = numMidiChannels + static_cast<int> (oldestIdx);
+    if (activeSynth != nullptr)
+        fluid_synth_all_notes_off (activeSynth->synth, auxChan);
+
+    auxDrumSlots[oldestIdx].reset();
+    auxDrumSlots[oldestIdx].active = true;
+    auxDrumSlots[oldestIdx].sourceChannel = channel;
+    auxDrumSlots[oldestIdx].noteNumber = noteNumber;
+    auxDrumSlots[oldestIdx].setupIndex = setupIdx;
+    auxDrumSlots[oldestIdx].triggerTime = now;
+    return static_cast<int> (oldestIdx);
+}
+
+void FluidSynthEngine::setupAuxDrumSlotEq (int slotIndex,
+                                           const xg::DrumNoteParameters& noteParams,
+                                           int sourceChannel) noexcept
+{
+    if (! juce::isPositiveAndBelow (slotIndex, static_cast<int> (numAuxDrumChannels))
+        || ! juce::isPositiveAndBelow (sourceChannel, static_cast<int> (numMidiChannels)))
+        return;
+
+    auto& slot = auxDrumSlots[static_cast<size_t> (slotIndex)];
+    const auto sr = currentSampleRate.load (std::memory_order_relaxed);
+    if (sr <= 1.0)
+        return;
+
+    const auto nyquist = sr * 0.49;
+    const auto& part = partParameters[static_cast<size_t> (sourceChannel)];
+
+    // 1. Note EQ (Bass and Treble shelves)
+    const auto noteBassDb = static_cast<float> (noteParams.eqBass - 64) * (12.0f / 64.0f);
+    if (std::abs (noteBassDb) >= 0.1f)
+    {
+        const auto gainFactor = juce::Decibels::decibelsToGain (noteBassDb);
+        const auto freq = juce::jlimit (20.0, nyquist, static_cast<double> (xg::lookupEqFrequency (part.eqBassFreq)));
+        const auto coeff = juce::IIRCoefficients::makeLowShelf (sr, freq, 0.707, gainFactor);
+        slot.noteBassFilters[0].setCoefficients (coeff);
+        slot.noteBassFilters[1].setCoefficients (coeff);
+        slot.noteBassActive = true;
+    }
+    else
+    {
+        slot.noteBassActive = false;
+        slot.noteBassFilters[0].makeInactive();
+        slot.noteBassFilters[1].makeInactive();
+    }
+
+    const auto noteTrebleDb = static_cast<float> (noteParams.eqTreble - 64) * (12.0f / 64.0f);
+    if (std::abs (noteTrebleDb) >= 0.1f)
+    {
+        const auto gainFactor = juce::Decibels::decibelsToGain (noteTrebleDb);
+        const auto freq = juce::jlimit (20.0, nyquist, static_cast<double> (xg::lookupEqFrequency (part.eqTrebleFreq)));
+        const auto coeff = juce::IIRCoefficients::makeHighShelf (sr, freq, 0.707, gainFactor);
+        slot.noteTrebleFilters[0].setCoefficients (coeff);
+        slot.noteTrebleFilters[1].setCoefficients (coeff);
+        slot.noteTrebleActive = true;
+    }
+    else
+    {
+        slot.noteTrebleActive = false;
+        slot.noteTrebleFilters[0].makeInactive();
+        slot.noteTrebleFilters[1].makeInactive();
+    }
+
+    // 2. Part EQ (in series)
+    const auto partBassDb = static_cast<float> (part.eqBass - 64);
+    if (std::abs (partBassDb) >= 0.1f)
+    {
+        const auto gainFactor = juce::Decibels::decibelsToGain (partBassDb);
+        const auto freq = juce::jlimit (20.0, nyquist, static_cast<double> (xg::lookupEqFrequency (part.eqBassFreq)));
+        const auto coeff = juce::IIRCoefficients::makeLowShelf (sr, freq, 0.707, gainFactor);
+        slot.partBassFilters[0].setCoefficients (coeff);
+        slot.partBassFilters[1].setCoefficients (coeff);
+        slot.partBassActive = true;
+    }
+    else
+    {
+        slot.partBassActive = false;
+        slot.partBassFilters[0].makeInactive();
+        slot.partBassFilters[1].makeInactive();
+    }
+
+    const auto partTrebleDb = static_cast<float> (part.eqTreble - 64);
+    if (std::abs (partTrebleDb) >= 0.1f)
+    {
+        const auto gainFactor = juce::Decibels::decibelsToGain (partTrebleDb);
+        const auto freq = juce::jlimit (20.0, nyquist, static_cast<double> (xg::lookupEqFrequency (part.eqTrebleFreq)));
+        const auto coeff = juce::IIRCoefficients::makeHighShelf (sr, freq, 0.707, gainFactor);
+        slot.partTrebleFilters[0].setCoefficients (coeff);
+        slot.partTrebleFilters[1].setCoefficients (coeff);
+        slot.partTrebleActive = true;
+    }
+    else
+    {
+        slot.partTrebleActive = false;
+        slot.partTrebleFilters[0].makeInactive();
+        slot.partTrebleFilters[1].makeInactive();
+    }
+
+    // 3. Send scaling factors
+    slot.noteReverbSendNorm = static_cast<float> (noteParams.reverbSend) / 127.0f;
+    slot.noteChorusSendNorm = static_cast<float> (noteParams.chorusSend) / 127.0f;
+    slot.noteVarSendNorm    = static_cast<float> (noteParams.variationSend) / 127.0f;
+}
+
+void FluidSynthEngine::setupGsAuxDrumSlotEq (int slotIndex,
+                                             const gs::DrumNoteParameters& noteParams,
+                                             int sourceChannel) noexcept
+{
+    if (! juce::isPositiveAndBelow (slotIndex, static_cast<int> (numAuxDrumChannels))
+        || ! juce::isPositiveAndBelow (sourceChannel, static_cast<int> (numMidiChannels)))
+        return;
+
+    auto& slot = auxDrumSlots[static_cast<size_t> (slotIndex)];
+    slot.noteBassActive = false;
+    slot.noteTrebleActive = false;
+    slot.partBassActive = false;
+    slot.partTrebleActive = false;
+
+    slot.noteReverbSendNorm = static_cast<float> (noteParams.reverbSend) / 127.0f;
+    slot.noteChorusSendNorm = static_cast<float> (noteParams.chorusSend) / 127.0f;
+    slot.noteVarSendNorm    = static_cast<float> (noteParams.delaySend) / 127.0f;
+}
+
 void FluidSynthEngine::applyDrumNoteGenerators (fluid_voice_t* v, const xg::DrumNoteParameters& noteParams) noexcept
 {
     if (v == nullptr)
@@ -2887,11 +3067,80 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
                         {
                             const auto prevNote = activeGroupNote[index][static_cast<size_t> (noteParams.alternateGroup)];
                             if (prevNote >= 0 && prevNote != noteNumber)
+                            {
                                 fluid_synth_noteoff (activeSynth->synth, channel, prevNote);
+                                for (size_t s = 0; s < numAuxDrumChannels; ++s)
+                                {
+                                    if (auxDrumSlots[s].active && auxDrumSlots[s].sourceChannel == channel && auxDrumSlots[s].noteNumber == prevNote)
+                                        fluid_synth_noteoff (activeSynth->synth, numMidiChannels + static_cast<int> (s), prevNote);
+                                }
+                            }
                             activeGroupNote[index][static_cast<size_t> (noteParams.alternateGroup)] = noteNumber;
                         }
 
                         const auto scaledVel = juce::jlimit (1, 127, static_cast<int> (std::round (rawVelocity * (static_cast<float> (noteParams.level) / 127.0f))));
+
+                        const bool hasCustomSends = (noteParams.reverbSend != 40
+                                                  || noteParams.chorusSend != 0
+                                                  || noteParams.delaySend != 0);
+
+                        if (hasCustomSends)
+                        {
+                            const auto slotIdx = allocateAuxDrumSlot (channel, noteNumber, (gsPart == gs::PartMode::Drum2) ? 2 : 1);
+                            const auto auxChan = numMidiChannels + slotIdx;
+
+                            fluid_synth_set_channel_type (activeSynth->synth, auxChan, CHANNEL_TYPE_DRUM);
+                            const auto bank = channelBank[index].load (std::memory_order_acquire);
+                            const auto prog = channelProgram[index].load (std::memory_order_acquire);
+                            if (auxChannelBank[static_cast<size_t> (slotIdx)] != bank || auxChannelProgram[static_cast<size_t> (slotIdx)] != prog)
+                            {
+                                fluid_synth_bank_select (activeSynth->synth, auxChan, bank);
+                                applyProgramChangeToSynth (*activeSynth, auxChan, prog, bank,
+                                                           channelBankMsb[index].load (std::memory_order_acquire),
+                                                           channelBankLsb[index].load (std::memory_order_acquire),
+                                                           activeMode, true);
+                                auxChannelBank[static_cast<size_t> (slotIdx)] = bank;
+                                auxChannelProgram[static_cast<size_t> (slotIdx)] = prog;
+                            }
+
+                            const auto vol = channelVolume[index].load (std::memory_order_acquire);
+                            const auto pan = channelPan[index].load (std::memory_order_acquire);
+                            fluid_synth_cc (activeSynth->synth, auxChan, 7, vol);
+                            fluid_synth_cc (activeSynth->synth, auxChan, 10, pan);
+                            fluid_synth_cc (activeSynth->synth, auxChan, 11, 127);
+                            int pb = 8192;
+                            fluid_synth_get_pitch_bend (activeSynth->synth, channel, &pb);
+                            fluid_synth_pitch_bend (activeSynth->synth, auxChan, pb);
+
+                            setupGsAuxDrumSlotEq (slotIdx, noteParams, channel);
+
+                            std::array<fluid_voice_t*, 256> voiceBuf {};
+                            fluid_synth_get_voicelist (activeSynth->synth, voiceBuf.data(), static_cast<int> (voiceBuf.size()), -1);
+                            unsigned int maxIdBefore = 0;
+                            for (auto* v : voiceBuf)
+                            {
+                                if (v == nullptr)
+                                    break;
+                                maxIdBefore = juce::jmax (maxIdBefore, fluid_voice_get_id (v));
+                            }
+
+                            fluid_synth_noteon (activeSynth->synth, auxChan, noteNumber, scaledVel);
+
+                            voiceBuf.fill (nullptr);
+                            fluid_synth_get_voicelist (activeSynth->synth, voiceBuf.data(), static_cast<int> (voiceBuf.size()), -1);
+                            for (auto* v : voiceBuf)
+                            {
+                                if (v == nullptr)
+                                    break;
+                                if (fluid_voice_get_id (v) > maxIdBefore
+                                    && fluid_voice_get_channel (v) == auxChan
+                                    && fluid_voice_get_key (v) == noteNumber)
+                                {
+                                    applyGsDrumNoteGenerators (v, noteParams);
+                                }
+                            }
+                            return;
+                        }
 
                         std::array<fluid_voice_t*, 256> voiceBuf {};
                         fluid_synth_get_voicelist (activeSynth->synth, voiceBuf.data(), static_cast<int> (voiceBuf.size()), -1);
@@ -2923,8 +3172,8 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
                 }
                 else
                 {
-                    const auto& setup = (partMode == xg::PartMode::Drums2 || partMode == xg::PartMode::Drums4)
-                                            ? drumSetup2 : drumSetup1;
+                    const auto setupIdx = (partMode == xg::PartMode::Drums2 || partMode == xg::PartMode::Drums4) ? 2 : 1;
+                    const auto& setup = (setupIdx == 2) ? drumSetup2 : drumSetup1;
                     const auto& noteParams = setup.notes[static_cast<size_t> (noteNumber)];
 
                     if (noteParams.modified)
@@ -2936,12 +3185,84 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
                         {
                             const auto prevNote = activeGroupNote[index][static_cast<size_t> (noteParams.alternateGroup)];
                             if (prevNote >= 0 && prevNote != noteNumber)
+                            {
                                 fluid_synth_noteoff (activeSynth->synth, channel, prevNote);
+                                for (size_t s = 0; s < numAuxDrumChannels; ++s)
+                                {
+                                    if (auxDrumSlots[s].active && auxDrumSlots[s].sourceChannel == channel && auxDrumSlots[s].noteNumber == prevNote)
+                                        fluid_synth_noteoff (activeSynth->synth, numMidiChannels + static_cast<int> (s), prevNote);
+                                }
+                            }
                             activeGroupNote[index][static_cast<size_t> (noteParams.alternateGroup)] = noteNumber;
                         }
 
                         const auto scaledVel = juce::jlimit (1, 127, static_cast<int> (std::round (rawVelocity * (static_cast<float> (noteParams.level) / 127.0f))));
 
+                        const bool hasCustomEqOrSends = (noteParams.eqBass != 64
+                                                      || noteParams.eqTreble != 64
+                                                      || noteParams.reverbSend != 40
+                                                      || noteParams.chorusSend != 0
+                                                      || noteParams.variationSend != 0);
+
+                        if (hasCustomEqOrSends)
+                        {
+                            const auto slotIdx = allocateAuxDrumSlot (channel, noteNumber, setupIdx);
+                            const auto auxChan = numMidiChannels + slotIdx;
+
+                            fluid_synth_set_channel_type (activeSynth->synth, auxChan, CHANNEL_TYPE_DRUM);
+                            const auto bank = channelBank[index].load (std::memory_order_acquire);
+                            const auto prog = channelProgram[index].load (std::memory_order_acquire);
+                            if (auxChannelBank[static_cast<size_t> (slotIdx)] != bank || auxChannelProgram[static_cast<size_t> (slotIdx)] != prog)
+                            {
+                                fluid_synth_bank_select (activeSynth->synth, auxChan, bank);
+                                applyProgramChangeToSynth (*activeSynth, auxChan, prog, bank,
+                                                           channelBankMsb[index].load (std::memory_order_acquire),
+                                                           channelBankLsb[index].load (std::memory_order_acquire),
+                                                           activeMode, true);
+                                auxChannelBank[static_cast<size_t> (slotIdx)] = bank;
+                                auxChannelProgram[static_cast<size_t> (slotIdx)] = prog;
+                            }
+
+                            const auto vol = channelVolume[index].load (std::memory_order_acquire);
+                            const auto pan = channelPan[index].load (std::memory_order_acquire);
+                            fluid_synth_cc (activeSynth->synth, auxChan, 7, vol);
+                            fluid_synth_cc (activeSynth->synth, auxChan, 10, pan);
+                            fluid_synth_cc (activeSynth->synth, auxChan, 11, 127);
+                            int pb = 8192;
+                            fluid_synth_get_pitch_bend (activeSynth->synth, channel, &pb);
+                            fluid_synth_pitch_bend (activeSynth->synth, auxChan, pb);
+
+                            setupAuxDrumSlotEq (slotIdx, noteParams, channel);
+
+                            std::array<fluid_voice_t*, 256> voiceBuf {};
+                            fluid_synth_get_voicelist (activeSynth->synth, voiceBuf.data(), static_cast<int> (voiceBuf.size()), -1);
+                            unsigned int maxIdBefore = 0;
+                            for (auto* v : voiceBuf)
+                            {
+                                if (v == nullptr)
+                                    break;
+                                maxIdBefore = juce::jmax (maxIdBefore, fluid_voice_get_id (v));
+                            }
+
+                            fluid_synth_noteon (activeSynth->synth, auxChan, noteNumber, scaledVel);
+
+                            voiceBuf.fill (nullptr);
+                            fluid_synth_get_voicelist (activeSynth->synth, voiceBuf.data(), static_cast<int> (voiceBuf.size()), -1);
+                            for (auto* v : voiceBuf)
+                            {
+                                if (v == nullptr)
+                                    break;
+                                if (fluid_voice_get_id (v) > maxIdBefore
+                                    && fluid_voice_get_channel (v) == auxChan
+                                    && fluid_voice_get_key (v) == noteNumber)
+                                {
+                                    applyDrumNoteGenerators (v, noteParams);
+                                }
+                            }
+                            return;
+                        }
+
+                        // Otherwise (pitch/pan/filter only), play on regular channel
                         std::array<fluid_voice_t*, 256> voiceBuf {};
                         fluid_synth_get_voicelist (activeSynth->synth, voiceBuf.data(), static_cast<int> (voiceBuf.size()), -1);
                         unsigned int maxIdBefore = 0;
@@ -3067,6 +3388,11 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
                     }
                 }
                 fluid_synth_noteoff (activeSynth->synth, channel, noteNumber);
+                for (size_t s = 0; s < numAuxDrumChannels; ++s)
+                {
+                    if (auxDrumSlots[s].active && auxDrumSlots[s].sourceChannel == channel && auxDrumSlots[s].noteNumber == noteNumber)
+                        fluid_synth_noteoff (activeSynth->synth, numMidiChannels + static_cast<int> (s), noteNumber);
+                }
             }
             else
             {
@@ -3086,7 +3412,14 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
         if (message.isAllNotesOff())
         {
             if (activeSynth != nullptr)
+            {
                 fluid_synth_all_notes_off (activeSynth->synth, channel);
+                for (size_t s = 0; s < numAuxDrumChannels; ++s)
+                {
+                    if (auxDrumSlots[s].active && auxDrumSlots[s].sourceChannel == channel)
+                        fluid_synth_all_notes_off (activeSynth->synth, numMidiChannels + static_cast<int> (s));
+                }
+            }
             return;
         }
 
@@ -3372,7 +3705,14 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
     else if (message.isPitchWheel())
     {
         if (activeSynth != nullptr)
+        {
             fluid_synth_pitch_bend (activeSynth->synth, channel, message.getPitchWheelValue());
+            for (size_t s = 0; s < numAuxDrumChannels; ++s)
+            {
+                if (auxDrumSlots[s].active && auxDrumSlots[s].sourceChannel == channel)
+                    fluid_synth_pitch_bend (activeSynth->synth, numMidiChannels + static_cast<int> (s), message.getPitchWheelValue());
+            }
+        }
     }
     else if (message.isChannelPressure())
     {
@@ -3464,7 +3804,7 @@ void FluidSynthEngine::renderSubRange (int totalSamples, float* destLeft, float*
         auto* curDestLeft = destLeft + samplesRendered;
         auto* curDestRight = destRight + samplesRendered;
 
-        for (int ch = 0; ch < numMidiChannels; ++ch)
+        for (int ch = 0; ch < totalSynthChannels; ++ch)
         {
             partLeftPtrs[static_cast<size_t> (ch)] = multiPartBuffer.getWritePointer (ch * 2);
             partRightPtrs[static_cast<size_t> (ch)] = multiPartBuffer.getWritePointer (ch * 2 + 1);
@@ -3488,8 +3828,21 @@ void FluidSynthEngine::renderSubRange (int totalSamples, float* destLeft, float*
                 juce::FloatVectorOperations::clear (partRightPtrs[static_cast<size_t> (ch)], chunkSize);
             }
         }
+        for (size_t s = 0; s < numAuxDrumChannels; ++s)
+        {
+            auto& slot = auxDrumSlots[s];
+            if (slot.active && juce::isPositiveAndBelow (slot.sourceChannel, static_cast<int> (numMidiChannels)))
+            {
+                if (channelMuted[static_cast<size_t> (slot.sourceChannel)].load (std::memory_order_relaxed))
+                {
+                    const auto auxCh = numMidiChannels + static_cast<int> (s);
+                    juce::FloatVectorOperations::clear (partLeftPtrs[static_cast<size_t> (auxCh)], chunkSize);
+                    juce::FloatVectorOperations::clear (partRightPtrs[static_cast<size_t> (auxCh)], chunkSize);
+                }
+            }
+        }
 
-        // 1. Part EQ on each channel
+        // 1. Part EQ on each channel 0..15
         for (int ch = 0; ch < numMidiChannels; ++ch)
         {
             auto& eq = partEqs[static_cast<size_t> (ch)];
@@ -3511,6 +3864,57 @@ void FluidSynthEngine::renderSubRange (int totalSamples, float* destLeft, float*
             }
         }
 
+        // 1b. Note EQ and Part EQ on Aux Drum channels 16..31
+        for (size_t s = 0; s < numAuxDrumChannels; ++s)
+        {
+            auto& slot = auxDrumSlots[s];
+            if (! slot.active)
+                continue;
+
+            const auto auxCh = numMidiChannels + static_cast<int> (s);
+            auto* auxL = partLeftPtrs[static_cast<size_t> (auxCh)];
+            auto* auxR = partRightPtrs[static_cast<size_t> (auxCh)];
+
+            // Step 1: Note EQ
+            if (slot.noteBassActive)
+            {
+                slot.noteBassFilters[0].processSamples (auxL, chunkSize);
+                slot.noteBassFilters[1].processSamples (auxR, chunkSize);
+            }
+            if (slot.noteTrebleActive)
+            {
+                slot.noteTrebleFilters[0].processSamples (auxL, chunkSize);
+                slot.noteTrebleFilters[1].processSamples (auxR, chunkSize);
+            }
+
+            // Step 2: Part EQ (in series)
+            if (slot.partBassActive)
+            {
+                slot.partBassFilters[0].processSamples (auxL, chunkSize);
+                slot.partBassFilters[1].processSamples (auxR, chunkSize);
+            }
+            if (slot.partTrebleActive)
+            {
+                slot.partTrebleFilters[0].processSamples (auxL, chunkSize);
+                slot.partTrebleFilters[1].processSamples (auxR, chunkSize);
+            }
+
+            // Silence detection for slot reclamation
+            const auto rangeL = juce::FloatVectorOperations::findMinAndMax (auxL, chunkSize);
+            const auto rangeR = juce::FloatVectorOperations::findMinAndMax (auxR, chunkSize);
+            if (std::max (std::abs (rangeL.getStart()), std::abs (rangeL.getEnd())) < 1e-5f
+                && std::max (std::abs (rangeR.getStart()), std::abs (rangeR.getEnd())) < 1e-5f)
+            {
+                slot.silentBlocks++;
+                if (slot.silentBlocks > 8)
+                    slot.active = false;
+            }
+            else
+            {
+                slot.silentBlocks = 0;
+            }
+        }
+
         // 2. Variation Effect (Insertion or System)
         variationInputBuffer.clear (0, 0, chunkSize);
         variationInputBuffer.clear (1, 0, chunkSize);
@@ -3523,11 +3927,34 @@ void FluidSynthEngine::renderSubRange (int totalSamples, float* destLeft, float*
             variationInputBuffer.copyFrom (0, 0, multiPartBuffer, static_cast<int> (partIdx * 2), 0, chunkSize);
             variationInputBuffer.copyFrom (1, 0, multiPartBuffer, static_cast<int> (partIdx * 2 + 1), 0, chunkSize);
 
+            for (size_t s = 0; s < numAuxDrumChannels; ++s)
+            {
+                const auto& slot = auxDrumSlots[s];
+                if (slot.active && slot.sourceChannel == varTargetPart)
+                {
+                    const auto auxCh = numMidiChannels + static_cast<int> (s);
+                    variationInputBuffer.addFrom (0, 0, multiPartBuffer, auxCh * 2, 0, chunkSize);
+                    variationInputBuffer.addFrom (1, 0, multiPartBuffer, auxCh * 2 + 1, 0, chunkSize);
+                }
+            }
+
             variationProcessor.process (variationInputBuffer, variationOutputBuffer, chunkSize);
 
             // Replace channel audio with Variation output
             multiPartBuffer.copyFrom (static_cast<int> (partIdx * 2), 0, variationOutputBuffer, 0, 0, chunkSize);
             multiPartBuffer.copyFrom (static_cast<int> (partIdx * 2 + 1), 0, variationOutputBuffer, 1, 0, chunkSize);
+
+            // Clear aux channel audio as it has been merged into variation output
+            for (size_t s = 0; s < numAuxDrumChannels; ++s)
+            {
+                const auto& slot = auxDrumSlots[s];
+                if (slot.active && slot.sourceChannel == varTargetPart)
+                {
+                    const auto auxCh = numMidiChannels + static_cast<int> (s);
+                    juce::FloatVectorOperations::clear (partLeftPtrs[static_cast<size_t> (auxCh)], chunkSize);
+                    juce::FloatVectorOperations::clear (partRightPtrs[static_cast<size_t> (auxCh)], chunkSize);
+                }
+            }
         }
         else if (isXg && variationParameters.connection == 1)
         {
@@ -3539,6 +3966,22 @@ void FluidSynthEngine::renderSubRange (int totalSamples, float* destLeft, float*
                 {
                     variationInputBuffer.addFrom (0, 0, multiPartBuffer, ch * 2, 0, chunkSize, vSend);
                     variationInputBuffer.addFrom (1, 0, multiPartBuffer, ch * 2 + 1, 0, chunkSize, vSend);
+                }
+            }
+
+            for (size_t s = 0; s < numAuxDrumChannels; ++s)
+            {
+                const auto& slot = auxDrumSlots[s];
+                if (slot.active && juce::isPositiveAndBelow (slot.sourceChannel, static_cast<int> (numMidiChannels)))
+                {
+                    const auto partVarSend = static_cast<float> (partParameters[static_cast<size_t> (slot.sourceChannel)].variationSend) / 127.0f;
+                    const auto effVarSend = slot.noteVarSendNorm * partVarSend;
+                    if (effVarSend > 0.0f)
+                    {
+                        const auto auxCh = numMidiChannels + static_cast<int> (s);
+                        variationInputBuffer.addFrom (0, 0, multiPartBuffer, auxCh * 2, 0, chunkSize, effVarSend);
+                        variationInputBuffer.addFrom (1, 0, multiPartBuffer, auxCh * 2 + 1, 0, chunkSize, effVarSend);
+                    }
                 }
             }
 
@@ -3558,6 +4001,22 @@ void FluidSynthEngine::renderSubRange (int totalSamples, float* destLeft, float*
                 chorusBusBuffer.addFrom (1, 0, multiPartBuffer, ch * 2 + 1, 0, chunkSize, cSend);
             }
         }
+        for (size_t s = 0; s < numAuxDrumChannels; ++s)
+        {
+            const auto& slot = auxDrumSlots[s];
+            if (slot.active && juce::isPositiveAndBelow (slot.sourceChannel, static_cast<int> (numMidiChannels)))
+            {
+                const auto partChorusSend = static_cast<float> (partParameters[static_cast<size_t> (slot.sourceChannel)].chorusSend) / 127.0f;
+                const auto effChorusSend = slot.noteChorusSendNorm * partChorusSend;
+                if (effChorusSend > 0.0f)
+                {
+                    const auto auxCh = numMidiChannels + static_cast<int> (s);
+                    chorusBusBuffer.addFrom (0, 0, multiPartBuffer, auxCh * 2, 0, chunkSize, effChorusSend);
+                    chorusBusBuffer.addFrom (1, 0, multiPartBuffer, auxCh * 2 + 1, 0, chunkSize, effChorusSend);
+                }
+            }
+        }
+
         if (isXg && variationParameters.connection == 1)
         {
             const auto varToChorus = static_cast<float> (variationParameters.sendToChorus) / 127.0f;
@@ -3586,6 +4045,22 @@ void FluidSynthEngine::renderSubRange (int totalSamples, float* destLeft, float*
                 reverbBusBuffer.addFrom (1, 0, multiPartBuffer, ch * 2 + 1, 0, chunkSize, rSend);
             }
         }
+        for (size_t s = 0; s < numAuxDrumChannels; ++s)
+        {
+            const auto& slot = auxDrumSlots[s];
+            if (slot.active && juce::isPositiveAndBelow (slot.sourceChannel, static_cast<int> (numMidiChannels)))
+            {
+                const auto partReverbSend = static_cast<float> (partParameters[static_cast<size_t> (slot.sourceChannel)].reverbSend) / 127.0f;
+                const auto effReverbSend = slot.noteReverbSendNorm * partReverbSend;
+                if (effReverbSend > 0.0f)
+                {
+                    const auto auxCh = numMidiChannels + static_cast<int> (s);
+                    reverbBusBuffer.addFrom (0, 0, multiPartBuffer, auxCh * 2, 0, chunkSize, effReverbSend);
+                    reverbBusBuffer.addFrom (1, 0, multiPartBuffer, auxCh * 2 + 1, 0, chunkSize, effReverbSend);
+                }
+            }
+        }
+
         const auto chorusToReverb = isXg ? (static_cast<float> (chorusParameters.sendToReverb) / 127.0f) : 0.0f;
         if (chorusToReverb > 0.0f)
         {
@@ -3622,6 +4097,23 @@ void FluidSynthEngine::renderSubRange (int totalSamples, float* destLeft, float*
                                                           partRightPtrs[static_cast<size_t> (ch)],
                                                           dryLevel,
                                                           chunkSize);
+        }
+        for (size_t s = 0; s < numAuxDrumChannels; ++s)
+        {
+            const auto& slot = auxDrumSlots[s];
+            if (slot.active && juce::isPositiveAndBelow (slot.sourceChannel, static_cast<int> (numMidiChannels)))
+            {
+                const auto dryLevel = static_cast<float> (partParameters[static_cast<size_t> (slot.sourceChannel)].dryLevel) / 127.0f;
+                const auto auxCh = numMidiChannels + static_cast<int> (s);
+                juce::FloatVectorOperations::addWithMultiply (curDestLeft,
+                                                              partLeftPtrs[static_cast<size_t> (auxCh)],
+                                                              dryLevel,
+                                                              chunkSize);
+                juce::FloatVectorOperations::addWithMultiply (curDestRight,
+                                                              partRightPtrs[static_cast<size_t> (auxCh)],
+                                                              dryLevel,
+                                                              chunkSize);
+            }
         }
 
         // Chorus Return

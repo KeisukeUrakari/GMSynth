@@ -136,8 +136,61 @@ private:
     enum
     {
         numMidiChannels = 16,
+        numAuxDrumChannels = 16,
+        totalSynthChannels = 32,
         maxRetiredChanges = 8
     };
+
+    struct AuxDrumSlot
+    {
+        bool active = false;
+        int sourceChannel = -1;
+        int noteNumber = -1;
+        int setupIndex = 0;
+        uint64_t triggerTime = 0;
+        int silentBlocks = 0;
+
+        // Note EQ (Bass and Treble shelves)
+        std::array<juce::IIRFilter, 2> noteBassFilters;
+        std::array<juce::IIRFilter, 2> noteTrebleFilters;
+        bool noteBassActive = false;
+        bool noteTrebleActive = false;
+
+        // Part EQ (Bass and Treble shelves in series)
+        std::array<juce::IIRFilter, 2> partBassFilters;
+        std::array<juce::IIRFilter, 2> partTrebleFilters;
+        bool partBassActive = false;
+        bool partTrebleActive = false;
+
+        float noteReverbSendNorm = 40.0f / 127.0f;
+        float noteChorusSendNorm = 0.0f;
+        float noteVarSendNorm = 0.0f;
+
+        void reset() noexcept
+        {
+            active = false;
+            sourceChannel = -1;
+            noteNumber = -1;
+            setupIndex = 0;
+            triggerTime = 0;
+            silentBlocks = 0;
+            for (auto& f : noteBassFilters) f.reset();
+            for (auto& f : noteTrebleFilters) f.reset();
+            for (auto& f : partBassFilters) f.reset();
+            for (auto& f : partTrebleFilters) f.reset();
+            noteBassActive = false;
+            noteTrebleActive = false;
+            partBassActive = false;
+            partTrebleActive = false;
+            noteReverbSendNorm = 40.0f / 127.0f;
+            noteChorusSendNorm = 0.0f;
+            noteVarSendNorm = 0.0f;
+        }
+    };
+
+    int allocateAuxDrumSlot (int channel, int noteNumber, int setupIdx) noexcept;
+    void setupAuxDrumSlotEq (int slotIndex, const xg::DrumNoteParameters& noteParams, int sourceChannel) noexcept;
+    void setupGsAuxDrumSlotEq (int slotIndex, const gs::DrumNoteParameters& noteParams, int sourceChannel) noexcept;
 
     static std::unique_ptr<SynthInstance> createSynth (const juce::File& file,
                                                         double sampleRate,
@@ -280,9 +333,14 @@ private:
     juce::dsp::Chorus<float> chorusProcessor;
     VariationEffectProcessor variationProcessor;
 
+    std::array<AuxDrumSlot, numAuxDrumChannels> auxDrumSlots;
+    uint64_t auxDrumTimestamp = 0;
+    std::array<int, numAuxDrumChannels> auxChannelBank {};
+    std::array<int, numAuxDrumChannels> auxChannelProgram {};
+
     juce::AudioBuffer<float> multiPartBuffer;
-    std::array<float*, numMidiChannels> partLeftPtrs {};
-    std::array<float*, numMidiChannels> partRightPtrs {};
+    std::array<float*, totalSynthChannels> partLeftPtrs {};
+    std::array<float*, totalSynthChannels> partRightPtrs {};
 
     juce::AudioBuffer<float> reverbBusBuffer;
     juce::AudioBuffer<float> chorusBusBuffer;
