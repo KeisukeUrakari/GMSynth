@@ -98,6 +98,52 @@ namespace xg
         }
     };
 
+    struct ControllerModulationDestination
+    {
+        int pitch = 64;       // 28H..58H (-24..+24 semitones, 40H = 0)
+        int filter = 64;      // 00H..7FH (-9600..+9450 cents, 40H = 0)
+        int amplitude = 64;   // 00H..7FH (-100%..+100%, 40H = 0)
+        int lfoPmodDepth = 0; // 00H..7FH (0..127)
+        int lfoFmodDepth = 0; // 00H..7FH (0..127)
+        int lfoAmodDepth = 0; // 00H..7FH (0..127)
+
+        void reset (int defaultPmod = 0, int defaultPitch = 64) noexcept
+        {
+            pitch = defaultPitch;
+            filter = 64;
+            amplitude = 64;
+            lfoPmodDepth = defaultPmod;
+            lfoFmodDepth = 0;
+            lfoAmodDepth = 0;
+        }
+    };
+
+    struct ControllerMatrix
+    {
+        ControllerModulationDestination mw;   // 1D..22: default PMOD = 10 (0x0A)
+        ControllerModulationDestination bend; // 23..28: default pitch = 66 (+2 semitones, 0x42)
+        int bendPitchLow = 62;                // 70: default pitch = 62 (-2 semitones, 0x3E)
+        ControllerModulationDestination cat;  // 4D..52: Channel Aftertouch
+        ControllerModulationDestination pat;  // 53..58: Polyphonic Aftertouch
+        uint8_t ac1ControllerNo = 16;         // 59: default CC#16 (General Purpose 1)
+        ControllerModulationDestination ac1;  // 5A..5F: Assignable Controller 1
+        uint8_t ac2ControllerNo = 17;         // 60: default CC#17 (General Purpose 2)
+        ControllerModulationDestination ac2;  // 61..66: Assignable Controller 2
+
+        void reset() noexcept
+        {
+            mw.reset (10, 64);
+            bend.reset (0, 66);
+            bendPitchLow = 62;
+            cat.reset (0, 64);
+            pat.reset (0, 64);
+            ac1ControllerNo = 16;
+            ac1.reset (0, 64);
+            ac2ControllerNo = 17;
+            ac2.reset (0, 64);
+        }
+    };
+
     struct PartParameters
     {
         int filterCutoff = defaultFilterCutoff;
@@ -133,6 +179,8 @@ namespace xg
         int portamentoTime = 0;        // 0..127
         int elementReserve = 2;        // 0..32
 
+        ControllerMatrix ctrlMatrix;
+
         void reset() noexcept
         {
             filterCutoff = defaultFilterCutoff;
@@ -167,6 +215,8 @@ namespace xg
             portamentoSwitch = 0;
             portamentoTime = 0;
             elementReserve = 2;
+
+            ctrlMatrix.reset();
         }
 
         void updateDetuneCents() noexcept

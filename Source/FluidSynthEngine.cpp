@@ -1199,7 +1199,8 @@ void FluidSynthEngine::resetChannelState (int channel) noexcept
         activeNoteTransposition[index][n] = static_cast<uint8_t> (n);
     activeGroupNote[index].fill (-1);
     resetAllGenerators (channel);
-    updateChannelTuning (channel);
+    resetChannelControllers (channel);
+    updateChannelModulation (channel);
 
     if (activeSynth != nullptr)
     {
@@ -1210,6 +1211,24 @@ void FluidSynthEngine::resetChannelState (int channel) noexcept
         fluid_synth_cc (activeSynth->synth, channel, 91, gsActive ? gs::defaultReverbSend : xg::defaultReverbSend);
         fluid_synth_cc (activeSynth->synth, channel, 93, gsActive ? gs::defaultChorusSend : xg::defaultChorusSend);
         fluid_synth_pitch_bend (activeSynth->synth, channel, 8192);
+
+        if (xgActive)
+        {
+            // Mute CC#1 pitch modulation range in XG mode so that Modulation Matrix exclusively controls vibrato
+            fluid_synth_cc (activeSynth->synth, channel, 101, 0);
+            fluid_synth_cc (activeSynth->synth, channel, 100, 5);
+            fluid_synth_cc (activeSynth->synth, channel, 6, 0);
+            fluid_synth_cc (activeSynth->synth, channel, 38, 0);
+            fluid_synth_cc (activeSynth->synth, channel, 101, 127);
+            fluid_synth_cc (activeSynth->synth, channel, 100, 127);
+
+            // Set Pitch Bend Sensitivity to default 2 semitones
+            fluid_synth_cc (activeSynth->synth, channel, 101, 0);
+            fluid_synth_cc (activeSynth->synth, channel, 100, 0);
+            fluid_synth_cc (activeSynth->synth, channel, 6, 2);
+            fluid_synth_cc (activeSynth->synth, channel, 101, 127);
+            fluid_synth_cc (activeSynth->synth, channel, 100, 127);
+        }
     }
 }
 
@@ -1889,8 +1908,39 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
                     setPartEgRelease (channel, val);
                     break;
 
+                case 0x1d: // MW Pitch Control
+                    p.ctrlMatrix.mw.pitch = juce::jlimit (0x28, 0x58, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x1e: // MW Filter Control
+                    p.ctrlMatrix.mw.filter = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x1f: // MW Amp Control
+                    p.ctrlMatrix.mw.amplitude = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x20: // MW LFO PMOD Depth
+                    p.ctrlMatrix.mw.lfoPmodDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x21: // MW LFO FMOD Depth
+                    p.ctrlMatrix.mw.lfoFmodDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x22: // MW LFO AMOD Depth
+                    p.ctrlMatrix.mw.lfoAmodDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
                 case 0x23: // Bend Pitch Control
                 {
+                    p.ctrlMatrix.bend.pitch = juce::jlimit (0x28, 0x58, static_cast<int> (val));
                     const auto semitones = std::abs (static_cast<int> (val) - 64);
                     p.pitchBendSensitivity = semitones;
                     if (activeSynth != nullptr)
@@ -1901,8 +1951,171 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
                         fluid_synth_cc (activeSynth->synth, channel, 101, 127);
                         fluid_synth_cc (activeSynth->synth, channel, 100, 127);
                     }
+                    updateChannelModulation (channel);
                     break;
                 }
+
+                case 0x24: // Bend Filter Control
+                    p.ctrlMatrix.bend.filter = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x25: // Bend Amp Control
+                    p.ctrlMatrix.bend.amplitude = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x26: // Bend LFO PMOD Depth
+                    p.ctrlMatrix.bend.lfoPmodDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x27: // Bend LFO FMOD Depth
+                    p.ctrlMatrix.bend.lfoFmodDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x28: // Bend LFO AMOD Depth
+                    p.ctrlMatrix.bend.lfoAmodDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x4d: // CAT Pitch Control
+                    p.ctrlMatrix.cat.pitch = juce::jlimit (0x28, 0x58, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x4e: // CAT Filter Control
+                    p.ctrlMatrix.cat.filter = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x4f: // CAT Amp Control
+                    p.ctrlMatrix.cat.amplitude = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x50: // CAT LFO PMOD Depth
+                    p.ctrlMatrix.cat.lfoPmodDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x51: // CAT LFO FMOD Depth
+                    p.ctrlMatrix.cat.lfoFmodDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x52: // CAT LFO AMOD Depth
+                    p.ctrlMatrix.cat.lfoAmodDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x53: // PAT Pitch Control
+                    p.ctrlMatrix.pat.pitch = juce::jlimit (0x28, 0x58, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x54: // PAT Filter Control
+                    p.ctrlMatrix.pat.filter = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x55: // PAT Amp Control
+                    p.ctrlMatrix.pat.amplitude = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x56: // PAT LFO PMOD Depth
+                    p.ctrlMatrix.pat.lfoPmodDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x57: // PAT LFO FMOD Depth
+                    p.ctrlMatrix.pat.lfoFmodDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x58: // PAT LFO AMOD Depth
+                    p.ctrlMatrix.pat.lfoAmodDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x59: // AC1 Controller Number
+                    p.ctrlMatrix.ac1ControllerNo = juce::jlimit (0, 95, static_cast<int> (val));
+                    channelAc1Norm[chIdx] = 0.0f;
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x5a: // AC1 Pitch Control
+                    p.ctrlMatrix.ac1.pitch = juce::jlimit (0x28, 0x58, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x5b: // AC1 Filter Control
+                    p.ctrlMatrix.ac1.filter = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x5c: // AC1 Amp Control
+                    p.ctrlMatrix.ac1.amplitude = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x5d: // AC1 LFO PMOD Depth
+                    p.ctrlMatrix.ac1.lfoPmodDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x5e: // AC1 LFO FMOD Depth
+                    p.ctrlMatrix.ac1.lfoFmodDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x5f: // AC1 LFO AMOD Depth
+                    p.ctrlMatrix.ac1.lfoAmodDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x60: // AC2 Controller Number
+                    p.ctrlMatrix.ac2ControllerNo = juce::jlimit (0, 95, static_cast<int> (val));
+                    channelAc2Norm[chIdx] = 0.0f;
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x61: // AC2 Pitch Control
+                    p.ctrlMatrix.ac2.pitch = juce::jlimit (0x28, 0x58, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x62: // AC2 Filter Control
+                    p.ctrlMatrix.ac2.filter = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x63: // AC2 Amp Control
+                    p.ctrlMatrix.ac2.amplitude = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x64: // AC2 LFO PMOD Depth
+                    p.ctrlMatrix.ac2.lfoPmodDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x65: // AC2 LFO FMOD Depth
+                    p.ctrlMatrix.ac2.lfoFmodDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x66: // AC2 LFO AMOD Depth
+                    p.ctrlMatrix.ac2.lfoAmodDepth = juce::jlimit (0, 127, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
+
+                case 0x70: // Bend Pitch Low Control
+                    p.ctrlMatrix.bendPitchLow = juce::jlimit (0x28, 0x58, static_cast<int> (val));
+                    updateChannelModulation (channel);
+                    break;
 
                 case 0x67: // Portamento Switch
                     p.portamentoSwitch = (val != 0 ? 1 : 0);
@@ -2310,8 +2523,10 @@ void FluidSynthEngine::resetAllGenerators (int channel) noexcept
     if (activeSynth == nullptr || ! juce::isPositiveAndBelow (channel, numMidiChannels))
         return;
 
+    fluid_synth_set_gen (activeSynth->synth, channel, GEN_FINETUNE, 0.0f);
     fluid_synth_set_gen (activeSynth->synth, channel, GEN_FILTERFC, 0.0f);
     fluid_synth_set_gen (activeSynth->synth, channel, GEN_FILTERQ, 0.0f);
+    fluid_synth_set_gen (activeSynth->synth, channel, GEN_ATTENUATION, 0.0f);
     fluid_synth_set_gen (activeSynth->synth, channel, GEN_VOLENVATTACK, 0.0f);
     fluid_synth_set_gen (activeSynth->synth, channel, GEN_MODENVATTACK, 0.0f);
     fluid_synth_set_gen (activeSynth->synth, channel, GEN_VOLENVDECAY, 0.0f);
@@ -2321,6 +2536,143 @@ void FluidSynthEngine::resetAllGenerators (int channel) noexcept
     fluid_synth_set_gen (activeSynth->synth, channel, GEN_VIBLFOFREQ, 0.0f);
     fluid_synth_set_gen (activeSynth->synth, channel, GEN_VIBLFOTOPITCH, 0.0f);
     fluid_synth_set_gen (activeSynth->synth, channel, GEN_VIBLFODELAY, 0.0f);
+    fluid_synth_set_gen (activeSynth->synth, channel, GEN_MODLFOTOPITCH, 0.0f);
+    fluid_synth_set_gen (activeSynth->synth, channel, GEN_MODLFOTOFILTERFC, 0.0f);
+    fluid_synth_set_gen (activeSynth->synth, channel, GEN_MODLFOTOVOL, 0.0f);
+}
+
+void FluidSynthEngine::resetChannelControllers (int channel) noexcept
+{
+    if (! juce::isPositiveAndBelow (channel, numMidiChannels))
+        return;
+
+    const auto index = static_cast<size_t> (channel);
+    channelModWheelNorm[index] = 0.0f;
+    channelPitchBendNorm[index] = 0.0f;
+    channelAftertouchNorm[index] = 0.0f;
+    channelAc1Norm[index] = 0.0f;
+    channelAc2Norm[index] = 0.0f;
+}
+
+void FluidSynthEngine::updateChannelModulation (int channel) noexcept
+{
+    if (activeSynth == nullptr || ! juce::isPositiveAndBelow (channel, numMidiChannels))
+        return;
+
+    const auto chIdx = static_cast<size_t> (channel);
+    const auto& p = partParameters[chIdx];
+    const auto& cm = p.ctrlMatrix;
+
+    const float mwVal = channelModWheelNorm[chIdx];
+    const float bendVal = channelPitchBendNorm[chIdx];
+    const float catVal = channelAftertouchNorm[chIdx];
+    const float ac1Val = channelAc1Norm[chIdx];
+    const float ac2Val = channelAc2Norm[chIdx];
+
+    // 1. Pitch Modulation
+    float extraPitchCents = (mwVal * static_cast<float> (cm.mw.pitch - 64)
+                           + catVal * static_cast<float> (cm.cat.pitch - 64)
+                           + ac1Val * static_cast<float> (cm.ac1.pitch - 64)
+                           + ac2Val * static_cast<float> (cm.ac2.pitch - 64)) * 100.0f;
+
+    if (bendVal < 0.0f)
+    {
+        const float expectedLowSemitones = static_cast<float> (cm.bendPitchLow - 64);
+        const float nativeLowSemitones = -static_cast<float> (p.pitchBendSensitivity);
+        extraPitchCents += (-bendVal) * (expectedLowSemitones - nativeLowSemitones) * 100.0f;
+    }
+
+    const float totalFineTune = (getActiveMode() == ActiveMode::GS)
+                              ? (gsSystemParameters.masterTuneCents + gsPartParameters[chIdx].pitchOffsetFineCents)
+                              : (systemParameters.masterTuneCents + p.detuneCents + extraPitchCents);
+
+    fluid_synth_set_gen (activeSynth->synth, channel, GEN_FINETUNE, totalFineTune);
+
+    // 2. Filter Cutoff Modulation (-9600..+9450 cents, 40H = 0, 150 cents/step)
+    float bendFilterOffset = 0.0f;
+    if (bendVal != 0.0f)
+        bendFilterOffset = bendVal * static_cast<float> (cm.bend.filter - 64) * 150.0f;
+
+    const float netFilterCents = mwVal * static_cast<float> (cm.mw.filter - 64) * 150.0f
+                               + bendFilterOffset
+                               + catVal * static_cast<float> (cm.cat.filter - 64) * 150.0f
+                               + ac1Val * static_cast<float> (cm.ac1.filter - 64) * 150.0f
+                               + ac2Val * static_cast<float> (cm.ac2.filter - 64) * 150.0f;
+
+    const float totalFilterCents = xg::cutoffOffsetToCents (p.filterCutoff) + netFilterCents;
+    fluid_synth_set_gen (activeSynth->synth, channel, GEN_FILTERFC, totalFilterCents);
+
+    // 3. Amplitude Modulation (-100%..+100%, 40H = 0)
+    float bendAmpDelta = 0.0f;
+    if (bendVal != 0.0f)
+        bendAmpDelta = bendVal * static_cast<float> (cm.bend.amplitude - 64) / 64.0f;
+
+    const float ampFactor = 1.0f + (mwVal * static_cast<float> (cm.mw.amplitude - 64) / 64.0f)
+                                 + bendAmpDelta
+                                 + (catVal * static_cast<float> (cm.cat.amplitude - 64) / 64.0f)
+                                 + (ac1Val * static_cast<float> (cm.ac1.amplitude - 64) / 64.0f)
+                                 + (ac2Val * static_cast<float> (cm.ac2.amplitude - 64) / 64.0f);
+
+    float attenCibels = 0.0f;
+    if (ampFactor <= 0.0001f)
+    {
+        attenCibels = 1440.0f;
+    }
+    else if (ampFactor < 1.0f)
+    {
+        attenCibels = -200.0f * std::log10 (ampFactor);
+        attenCibels = juce::jlimit (0.0f, 1440.0f, attenCibels);
+    }
+    fluid_synth_set_gen (activeSynth->synth, channel, GEN_ATTENUATION, attenCibels);
+
+    // 4. LFO PMOD Depth (Vibrato)
+    float baseVibratoCents = 0.0f;
+    if (p.vibratoDepth > 64)
+        baseVibratoCents = static_cast<float> (p.vibratoDepth - 64) * 2.0f;
+
+    const float netPmodCents = mwVal * static_cast<float> (cm.mw.lfoPmodDepth) * 5.0f
+                             + std::abs (bendVal) * static_cast<float> (cm.bend.lfoPmodDepth) * 5.0f
+                             + catVal * static_cast<float> (cm.cat.lfoPmodDepth) * 5.0f
+                             + ac1Val * static_cast<float> (cm.ac1.lfoPmodDepth) * 5.0f
+                             + ac2Val * static_cast<float> (cm.ac2.lfoPmodDepth) * 5.0f;
+
+    const float totalPmodCents = baseVibratoCents + netPmodCents;
+    fluid_synth_set_gen (activeSynth->synth, channel, GEN_VIBLFOTOPITCH, totalPmodCents);
+    fluid_synth_set_gen (activeSynth->synth, channel, GEN_MODLFOTOPITCH, totalPmodCents);
+
+    // 5. LFO FMOD Depth (Wah-wah filter sweep)
+    const float netFmodCents = mwVal * static_cast<float> (cm.mw.lfoFmodDepth) * 25.0f
+                             + std::abs (bendVal) * static_cast<float> (cm.bend.lfoFmodDepth) * 25.0f
+                             + catVal * static_cast<float> (cm.cat.lfoFmodDepth) * 25.0f
+                             + ac1Val * static_cast<float> (cm.ac1.lfoFmodDepth) * 25.0f
+                             + ac2Val * static_cast<float> (cm.ac2.lfoFmodDepth) * 25.0f;
+
+    fluid_synth_set_gen (activeSynth->synth, channel, GEN_MODLFOTOFILTERFC, netFmodCents);
+
+    // 6. LFO AMOD Depth (Tremolo volume sweep)
+    const float netAmodCibels = mwVal * static_cast<float> (cm.mw.lfoAmodDepth) * 1.5f
+                              + std::abs (bendVal) * static_cast<float> (cm.bend.lfoAmodDepth) * 1.5f
+                              + catVal * static_cast<float> (cm.cat.lfoAmodDepth) * 1.5f
+                              + ac1Val * static_cast<float> (cm.ac1.lfoAmodDepth) * 1.5f
+                              + ac2Val * static_cast<float> (cm.ac2.lfoAmodDepth) * 1.5f;
+
+    fluid_synth_set_gen (activeSynth->synth, channel, GEN_MODLFOTOVOL, netAmodCibels);
+
+    // Synchronize active Aux Drum slots
+    for (size_t s = 0; s < numAuxDrumChannels; ++s)
+    {
+        if (auxDrumSlots[s].active && auxDrumSlots[s].sourceChannel == channel)
+        {
+            const auto auxChan = numMidiChannels + static_cast<int> (s);
+            fluid_synth_set_gen (activeSynth->synth, auxChan, GEN_FINETUNE, totalFineTune);
+            fluid_synth_set_gen (activeSynth->synth, auxChan, GEN_FILTERFC, totalFilterCents);
+            fluid_synth_set_gen (activeSynth->synth, auxChan, GEN_ATTENUATION, attenCibels);
+            fluid_synth_set_gen (activeSynth->synth, auxChan, GEN_VIBLFOTOPITCH, totalPmodCents);
+            fluid_synth_set_gen (activeSynth->synth, auxChan, GEN_MODLFOTOPITCH, totalPmodCents);
+            fluid_synth_set_gen (activeSynth->synth, auxChan, GEN_MODLFOTOFILTERFC, netFmodCents);
+            fluid_synth_set_gen (activeSynth->synth, auxChan, GEN_MODLFOTOVOL, netAmodCibels);
+        }
+    }
 }
 
 void FluidSynthEngine::setPartFilterCutoff (int channel, int value) noexcept
@@ -2330,12 +2682,9 @@ void FluidSynthEngine::setPartFilterCutoff (int channel, int value) noexcept
 
     const auto clamped = juce::jlimit (0, 127, value);
     partParameters[static_cast<size_t> (channel)].filterCutoff = clamped;
+    updateChannelModulation (channel);
     if (activeSynth != nullptr)
-    {
-        fluid_synth_set_gen (activeSynth->synth, channel, GEN_FILTERFC,
-                             xg::cutoffOffsetToCents (clamped));
         fluid_synth_cc (activeSynth->synth, channel, 74, clamped);
-    }
 }
 
 void FluidSynthEngine::setPartFilterResonance (int channel, int value) noexcept
@@ -2431,53 +2780,17 @@ void FluidSynthEngine::setPartVibratoDepth (int channel, int value) noexcept
 
     const auto clamped = juce::jlimit (0, 127, value);
     partParameters[static_cast<size_t> (channel)].vibratoDepth = clamped;
+    updateChannelModulation (channel);
+
     if (activeSynth != nullptr)
     {
-        const auto depthCents = (clamped > 64) ? static_cast<float> (clamped - 64) * 2.0f : 0.0f;
-        fluid_synth_set_gen (activeSynth->synth, channel, GEN_VIBLFOTOPITCH, depthCents);
-
-        if (clamped == 0)
-        {
-            // When Vibrato Depth is explicitly 0, mute active voices immediately
-            std::array<fluid_voice_t*, 256> voiceBuf {};
-            fluid_synth_get_voicelist (activeSynth->synth, voiceBuf.data(), static_cast<int> (voiceBuf.size()), -1);
-            const auto modWheel = channelModulation[static_cast<size_t> (channel)].load (std::memory_order_relaxed);
-            for (auto* v : voiceBuf)
-            {
-                if (v == nullptr)
-                    break;
-                if (fluid_voice_get_channel (v) == channel)
-                {
-                    fluid_voice_gen_set (v, GEN_VIBLFOTOPITCH, 0.0f);
-                    fluid_voice_update_param (v, GEN_VIBLFOTOPITCH);
-
-                    if (modWheel == 0)
-                    {
-                        fluid_voice_gen_set (v, GEN_MODLFOTOPITCH, 0.0f);
-                        fluid_voice_update_param (v, GEN_MODLFOTOPITCH);
-                    }
-                }
-            }
-
-            // Mute CC#1 pitch modulation range to prevent unintended vibrato
-            fluid_synth_cc (activeSynth->synth, channel, 101, 0);
-            fluid_synth_cc (activeSynth->synth, channel, 100, 5);
-            fluid_synth_cc (activeSynth->synth, channel, 6, 0);
-            fluid_synth_cc (activeSynth->synth, channel, 38, 0);
-            fluid_synth_cc (activeSynth->synth, channel, 101, 127);
-            fluid_synth_cc (activeSynth->synth, channel, 100, 127);
-        }
-        else if (clamped == 64)
-        {
-            // Restore default 50 cents modulation depth range
-            fluid_synth_cc (activeSynth->synth, channel, 101, 0);
-            fluid_synth_cc (activeSynth->synth, channel, 100, 5);
-            fluid_synth_cc (activeSynth->synth, channel, 6, 0);
-            fluid_synth_cc (activeSynth->synth, channel, 38, 64);
-            fluid_synth_cc (activeSynth->synth, channel, 101, 127);
-            fluid_synth_cc (activeSynth->synth, channel, 100, 127);
-        }
-
+        // Mute CC#1 pitch modulation range in XG mode so that Modulation Matrix exclusively controls vibrato
+        fluid_synth_cc (activeSynth->synth, channel, 101, 0);
+        fluid_synth_cc (activeSynth->synth, channel, 100, 5);
+        fluid_synth_cc (activeSynth->synth, channel, 6, 0);
+        fluid_synth_cc (activeSynth->synth, channel, 38, 0);
+        fluid_synth_cc (activeSynth->synth, channel, 101, 127);
+        fluid_synth_cc (activeSynth->synth, channel, 100, 127);
         fluid_synth_cc (activeSynth->synth, channel, 77, clamped);
     }
 }
@@ -2866,6 +3179,19 @@ void FluidSynthEngine::setupAuxDrumSlotEq (int slotIndex,
     slot.noteReverbSendNorm = static_cast<float> (noteParams.reverbSend) / 127.0f;
     slot.noteChorusSendNorm = static_cast<float> (noteParams.chorusSend) / 127.0f;
     slot.noteVarSendNorm    = static_cast<float> (noteParams.variationSend) / 127.0f;
+
+    // 4. Mirror source channel generators
+    const auto auxChan = numMidiChannels + slotIndex;
+    if (activeSynth != nullptr)
+    {
+        fluid_synth_set_gen (activeSynth->synth, auxChan, GEN_FINETUNE, fluid_synth_get_gen (activeSynth->synth, sourceChannel, GEN_FINETUNE));
+        fluid_synth_set_gen (activeSynth->synth, auxChan, GEN_FILTERFC, fluid_synth_get_gen (activeSynth->synth, sourceChannel, GEN_FILTERFC));
+        fluid_synth_set_gen (activeSynth->synth, auxChan, GEN_ATTENUATION, fluid_synth_get_gen (activeSynth->synth, sourceChannel, GEN_ATTENUATION));
+        fluid_synth_set_gen (activeSynth->synth, auxChan, GEN_VIBLFOTOPITCH, fluid_synth_get_gen (activeSynth->synth, sourceChannel, GEN_VIBLFOTOPITCH));
+        fluid_synth_set_gen (activeSynth->synth, auxChan, GEN_MODLFOTOPITCH, fluid_synth_get_gen (activeSynth->synth, sourceChannel, GEN_MODLFOTOPITCH));
+        fluid_synth_set_gen (activeSynth->synth, auxChan, GEN_MODLFOTOFILTERFC, fluid_synth_get_gen (activeSynth->synth, sourceChannel, GEN_MODLFOTOFILTERFC));
+        fluid_synth_set_gen (activeSynth->synth, auxChan, GEN_MODLFOTOVOL, fluid_synth_get_gen (activeSynth->synth, sourceChannel, GEN_MODLFOTOVOL));
+    }
 }
 
 void FluidSynthEngine::setupGsAuxDrumSlotEq (int slotIndex,
@@ -3448,6 +3774,8 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
             channelPan[index].store (xg::defaultPan, std::memory_order_release);
             channelModulation[index].store (0, std::memory_order_release);
             nrpnStates[index].reset();
+            resetChannelControllers (channel);
+            updateChannelModulation (channel);
             if (activeSynth != nullptr)
                 fluid_synth_cc (activeSynth->synth, channel, controller, value);
             channelStateNeedsApply = true;
@@ -3655,6 +3983,8 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
         if (controller == 1)
         {
             channelModulation[index].store (static_cast<uint8_t> (value), std::memory_order_release);
+            channelModWheelNorm[index] = static_cast<float> (value) / 127.0f;
+            updateChannelModulation (channel);
         }
         else if (controller == 7)
         {
@@ -3666,6 +3996,19 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
         else if (controller == 10)
         {
             channelPan[index].store (message.getControllerValue(), std::memory_order_release);
+        }
+
+        const auto ac1No = partParameters[index].ctrlMatrix.ac1ControllerNo;
+        const auto ac2No = partParameters[index].ctrlMatrix.ac2ControllerNo;
+        if (controller == ac1No && ac1No != 1)
+        {
+            channelAc1Norm[index] = static_cast<float> (value) / 127.0f;
+            updateChannelModulation (channel);
+        }
+        if (controller == ac2No && ac2No != 1)
+        {
+            channelAc2Norm[index] = static_cast<float> (value) / 127.0f;
+            updateChannelModulation (channel);
         }
 
         if (activeSynth == nullptr)
@@ -3704,20 +4047,34 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
     }
     else if (message.isPitchWheel())
     {
+        const auto rawValue = message.getPitchWheelValue();
+        const auto index = static_cast<size_t> (channel);
+        if (rawValue >= 8192)
+            channelPitchBendNorm[index] = static_cast<float> (rawValue - 8192) / 8191.0f;
+        else
+            channelPitchBendNorm[index] = static_cast<float> (rawValue - 8192) / 8192.0f;
+
+        updateChannelModulation (channel);
+
         if (activeSynth != nullptr)
         {
-            fluid_synth_pitch_bend (activeSynth->synth, channel, message.getPitchWheelValue());
+            fluid_synth_pitch_bend (activeSynth->synth, channel, rawValue);
             for (size_t s = 0; s < numAuxDrumChannels; ++s)
             {
                 if (auxDrumSlots[s].active && auxDrumSlots[s].sourceChannel == channel)
-                    fluid_synth_pitch_bend (activeSynth->synth, numMidiChannels + static_cast<int> (s), message.getPitchWheelValue());
+                    fluid_synth_pitch_bend (activeSynth->synth, numMidiChannels + static_cast<int> (s), rawValue);
             }
         }
     }
     else if (message.isChannelPressure())
     {
+        const auto val = message.getChannelPressureValue();
+        const auto index = static_cast<size_t> (channel);
+        channelAftertouchNorm[index] = static_cast<float> (val) / 127.0f;
+        updateChannelModulation (channel);
+
         if (activeSynth != nullptr)
-            fluid_synth_channel_pressure (activeSynth->synth, channel, message.getChannelPressureValue());
+            fluid_synth_channel_pressure (activeSynth->synth, channel, val);
     }
     else if (message.isAftertouch())
     {

@@ -239,6 +239,8 @@ private:
     void updatePartEqCoefficients (int channel) noexcept;
     void updateAllPartEqCoefficients() noexcept;
     void resetAllGenerators (int channel) noexcept;
+    void updateChannelModulation (int channel) noexcept;
+    void resetChannelControllers (int channel) noexcept;
     void applyDrumNoteGenerators (fluid_voice_t* voice, const xg::DrumNoteParameters& noteParams) noexcept;
     void applyGsDrumNoteGenerators (fluid_voice_t* voice, const gs::DrumNoteParameters& noteParams) noexcept;
     void applyMelodicVoiceGenerators (fluid_voice_t* voice, int channel) noexcept;
@@ -309,6 +311,12 @@ private:
     std::array<uint8_t, numMidiChannels> appliedChannelPartMode;
     std::array<int, numMidiChannels> appliedChannelProgram;
     float appliedMasterGain = 0.8f;
+
+    std::array<float, numMidiChannels> channelModWheelNorm {};
+    std::array<float, numMidiChannels> channelPitchBendNorm {};
+    std::array<float, numMidiChannels> channelAftertouchNorm {};
+    std::array<float, numMidiChannels> channelAc1Norm {};
+    std::array<float, numMidiChannels> channelAc2Norm {};
     struct PartEq
     {
         std::array<juce::IIRFilter, 2> bassFilters;
