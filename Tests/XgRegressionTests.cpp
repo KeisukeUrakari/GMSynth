@@ -352,12 +352,337 @@ void testE08_PartModeDrums34Ignored()
 // =============================================================================
 // Main Test Runner
 // =============================================================================
+
+// =============================================================================
+// TEST-E02: Delay Family Parameter Specialization (Delay LCR, LR, Echo, Cross)
+// =============================================================================
+void testE02_DelayFamilySpecialization()
+{
+    std::cout << "\n=== TEST-E02: Delay Family Parameter Specialization ===" << std::endl;
+
+    VariationEffectProcessor proc;
+    proc.prepare (44100.0, 2048);
+
+    xg::VariationParameters p;
+
+    // 1. Delay L,C,R (MSB 0x05)
+    p.reset();
+    p.typeMsb = xg::varTypeDelayLCR;
+    p.parameters14Bit[0] = 3000; // Lch Delay = 300.0ms
+    p.parameters14Bit[1] = 2000; // Rch Delay = 200.0ms
+    p.parameters14Bit[2] = 4000; // Cch Delay = 400.0ms
+    p.parameters14Bit[3] = 4500; // Feedback Delay = 450.0ms
+    p.parameters14Bit[4] = 80;   // Feedback Level
+    p.parameters14Bit[5] = 100;  // Cch Level (Param 6)
+    p.parameters14Bit[6] = 8;    // High Damp (Param 7)
+    proc.updateParameters (p);
+
+    logTestResult ("Delay LCR selects DelayType::LCR", proc.getDelayTypeForTest() == VariationEffectProcessor::DelayType::LCR);
+    logTestResult ("Delay LCR Param 6 (Cch Level) decodes correctly", isNear (proc.getDelayCchLevelForTest(), 100.0f / 127.0f, 0.01f));
+    logTestResult ("Delay LCR Param 4 (Feedback Delay) decodes to 450ms",
+                   isNear (proc.getFeedbackDelayLSamplesForTest(), 450.0f * 0.001f * 44100.0f, 1.0f));
+
+    // 2. Delay L,R (MSB 0x06)
+    p.reset();
+    p.typeMsb = xg::varTypeDelayLR;
+    proc.updateParameters (p);
+    logTestResult ("Delay LR selects DelayType::LR", proc.getDelayTypeForTest() == VariationEffectProcessor::DelayType::LR);
+
+    // 3. Echo (MSB 0x07)
+    p.reset();
+    p.typeMsb = xg::varTypeEcho;
+    p.parameters14Bit[0] = 1500; // Lch Delay 1 = 150ms
+    p.parameters14Bit[1] = 80;   // Lch Feedback Level (Param 2)
+    p.parameters14Bit[2] = 1800; // Rch Delay 1 = 180ms
+    p.parameters14Bit[3] = 96;   // Rch Feedback Level (Param 4)
+    proc.updateParameters (p);
+
+    logTestResult ("Echo selects DelayType::Echo", proc.getDelayTypeForTest() == VariationEffectProcessor::DelayType::Echo);
+    // Param 2 must be interpreted as Lch Feedback Level (NOT Rch Delay)
+    logTestResult ("Echo Param 2 is Lch Feedback Level (not Rch Delay)",
+                   isNear (proc.getEchoFbLForTest(), (80.0f - 64.0f) / 64.0f * 0.9f, 0.01f));
+    logTestResult ("Echo Param 4 is Rch Feedback Level",
+                   isNear (proc.getEchoFbRForTest(), (96.0f - 64.0f) / 64.0f * 0.9f, 0.01f));
+
+    // 4. Cross Delay (MSB 0x08)
+    p.reset();
+    p.typeMsb = xg::varTypeCrossDelay;
+    p.parameters14Bit[3] = 1; // Input Select = 1 (R only)
+    proc.updateParameters (p);
+    logTestResult ("Cross Delay selects DelayType::Cross", proc.getDelayTypeForTest() == VariationEffectProcessor::DelayType::Cross);
+    logTestResult ("Cross Delay Param 4 (Input Select) decodes to R only (1)", proc.getCrossDelayInputSelectForTest() == 1);
+
+    // Test impulse routing with Delay LCR
+    p.reset();
+    p.typeMsb = xg::varTypeDelayLCR;
+    p.parameters14Bit[0] = 100; // Lch = 10.0ms -> ~441 samples
+    p.parameters14Bit[1] = 200; // Rch = 20.0ms -> ~882 samples
+    p.parameters14Bit[2] = 300; // Cch = 30.0ms -> ~1323 samples
+    p.parameters14Bit[5] = 127; // Max Cch level
+    p.parameters14Bit[9] = 127; // 100% wet
+    proc.updateParameters (p);
+
+    juce::AudioBuffer<float> inBuf (2, 2048);
+    juce::AudioBuffer<float> outBuf (2, 2048);
+    inBuf.clear();
+    outBuf.clear();
+    inBuf.setSample (0, 0, 1.0f); // impulse on left channel only
+
+    proc.process (inBuf, outBuf, 2048);
+
+    // Left channel should have echo at ~441 and center echo at ~1323
+    const float* leftOut = outBuf.getReadPointer (0);
+    const float* rightOut = outBuf.getReadPointer (1);
+
+    logTestResult ("Delay LCR output Left has direct tap echo", std::abs (leftOut[441]) > 0.5f);
+    // Right channel should receive center echo at ~1323 even with impulse only on left
+    logTestResult ("Delay LCR output Right receives center tap echo", std::abs (rightOut[1323]) > 0.1f);
+}
+
+// =============================================================================
+// TEST-S01: Physical Mapping for Reverb and Chorus (Table#1, Table#2, Table#4)
+// =============================================================================
+void testS01_PhysicalMappingReverbChorus()
+{
+    std::cout << "\n=== TEST-S01: Physical Mapping for Reverb and Chorus ===" << std::endl;
+
+    FluidSynthEngine engine;
+    engine.prepare (44100.0, 512);
+
+    // 1. Chorus Table#1 (LFO Frequency: 0..127 -> 0.00Hz .. 39.7Hz)
+    // F0 43 10 4C 02 01 22 <rate> F7 (Param 1 = LFO Frequency, Address Low 0x22)
+    const uint8_t setRate0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x22, 0, 0xF7 };
+    engine.handleSysExForTest (setRate0, sizeof (setRate0));
+    logTestResult ("Chorus Table#1 data 0 -> 0.00 Hz", isNear (engine.getChorusProcessorRateForTest(), 0.00f, 0.01f));
+
+    const uint8_t setRate32[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x22, 32, 0xF7 };
+    engine.handleSysExForTest (setRate32, sizeof (setRate32));
+    logTestResult ("Chorus Table#1 data 32 -> 1.35 Hz", isNear (engine.getChorusProcessorRateForTest(), 1.35f, 0.01f));
+
+    const uint8_t setRate64[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x22, 64, 0xF7 };
+    engine.handleSysExForTest (setRate64, sizeof (setRate64));
+    logTestResult ("Chorus Table#1 data 64 -> 2.69 Hz", isNear (engine.getChorusProcessorRateForTest(), 2.69f, 0.01f));
+
+    const uint8_t setRate127[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x22, 127, 0xF7 };
+    engine.handleSysExForTest (setRate127, sizeof (setRate127));
+    logTestResult ("Chorus Table#1 data 127 -> 39.7 Hz", isNear (engine.getChorusProcessorRateForTest(), 39.70f, 0.01f));
+
+    // 2. Chorus Table#2 (Delay Offset: 0..127 -> 0.0ms .. 50.0ms)
+    // F0 43 10 4C 02 01 25 <delay> F7 (Param 4 = Delay Offset, Address Low 0x25)
+    const uint8_t setDelay0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x25, 0, 0xF7 };
+    engine.handleSysExForTest (setDelay0, sizeof (setDelay0));
+    logTestResult ("Chorus Table#2 data 0 -> 0.1 ms (clamped min)", isNear (engine.getChorusProcessorDelayForTest(), 0.1f, 0.01f));
+
+    const uint8_t setDelay64[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x25, 64, 0xF7 };
+    engine.handleSysExForTest (setDelay64, sizeof (setDelay64));
+    logTestResult ("Chorus Table#2 data 64 -> 6.4 ms", isNear (engine.getChorusProcessorDelayForTest(), 6.4f, 0.01f));
+
+    const uint8_t setDelay127[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x25, 127, 0xF7 };
+    engine.handleSysExForTest (setDelay127, sizeof (setDelay127));
+    logTestResult ("Chorus Table#2 data 127 -> 50.0 ms", isNear (engine.getChorusProcessorDelayForTest(), 50.0f, 0.01f));
+
+    // 3. Reverb Table#4 (Reverb Time: 0..69 -> 0.3s .. 30.0s)
+    // F0 43 10 4C 02 01 02 <time> F7 (Param 1 = Reverb Time, Address Low 0x02)
+    const uint8_t setRevTime0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x02, 0, 0xF7 };
+    engine.handleSysExForTest (setRevTime0, sizeof (setRevTime0));
+    const float roomSize0 = engine.getReverbProcessorRoomSizeForTest();
+
+    const uint8_t setRevTime18[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x02, 18, 0xF7 };
+    engine.handleSysExForTest (setRevTime18, sizeof (setRevTime18));
+    const float roomSize18 = engine.getReverbProcessorRoomSizeForTest();
+
+    const uint8_t setRevTime64[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x02, 64, 0xF7 };
+    engine.handleSysExForTest (setRevTime64, sizeof (setRevTime64));
+    const float roomSize64 = engine.getReverbProcessorRoomSizeForTest();
+
+    const uint8_t setRevTime69[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x02, 69, 0xF7 };
+    engine.handleSysExForTest (setRevTime69, sizeof (setRevTime69));
+    const float roomSize69 = engine.getReverbProcessorRoomSizeForTest();
+
+    logTestResult ("Reverb Time data 0 (0.3s) maps to roomSize ~0.10", isNear (roomSize0, 0.10f, 0.02f));
+    logTestResult ("Reverb Time data 18 (2.1s Hall1) maps to roomSize ~0.56", isNear (roomSize18, 0.56f, 0.03f));
+    logTestResult ("Reverb Time data 64 (17.0s) maps to roomSize ~0.90", isNear (roomSize64, 0.90f, 0.03f));
+    logTestResult ("Reverb Time data 69 (30.0s) maps to roomSize ~0.98", isNear (roomSize69, 0.98f, 0.02f));
+    logTestResult ("Reverb Time roomSize is strictly monotonic",
+                   roomSize0 < roomSize18 && roomSize18 < roomSize64 && roomSize64 < roomSize69);
+
+    // 4. Reverb LPF Cutoff Damping (Table#3: 1kHz..20kHz -> damping 1.0..0.0)
+    // F0 43 10 4C 02 01 06 <lpf> F7 (Param 5 = LPF Cutoff, Address Low 0x06)
+    const uint8_t setLpf60[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x06, 60, 0xF7 }; // 20kHz (Thru)
+    engine.handleSysExForTest (setLpf60, sizeof (setLpf60));
+    logTestResult ("Reverb LPF 20kHz (Thru) gives damping 0.0f", isNear (engine.getReverbProcessorDampingForTest(), 0.0f, 0.01f));
+
+    const uint8_t setLpf34[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x06, 34, 0xF7 }; // 1.0kHz
+    engine.handleSysExForTest (setLpf34, sizeof (setLpf34));
+    logTestResult ("Reverb LPF 1kHz gives damping 1.0f", isNear (engine.getReverbProcessorDampingForTest(), 1.0f, 0.01f));
+}
+
+// =============================================================================
+// TEST-U02: ESSENTIAL Variation Effect Types (Reverbs, Rotary, 2/3-Band EQ)
+// =============================================================================
+void testU02_EssentialVariationTypes()
+{
+    std::cout << "\n=== TEST-U02: ESSENTIAL Variation Effect Types ===" << std::endl;
+
+    VariationEffectProcessor proc;
+    proc.prepare (44100.0, 2048);
+
+    xg::VariationParameters p;
+
+    // 1. Variation Reverb (Hall 1: MSB 0x01)
+    p.reset();
+    p.typeMsb = xg::varTypeHall1;
+    p.parameters14Bit[0] = 18;  // Reverb Time = 2.1s (Table#4)
+    p.parameters14Bit[4] = 60;  // LPF = Thru
+    p.parameters14Bit[9] = 127; // 100% wet
+    proc.updateParameters (p);
+
+    juce::AudioBuffer<float> inBuf (2, 2048);
+    juce::AudioBuffer<float> outBuf (2, 2048);
+    inBuf.clear();
+    outBuf.clear();
+    inBuf.setSample (0, 0, 1.0f); // single impulse
+    proc.process (inBuf, outBuf, 2048);
+
+    // Variation reverb should produce a reverberant wet tail after comb delay (> 1100 samples)
+    float tailEnergy = 0.0f;
+    for (int i = 1100; i < 2048; ++i)
+        tailEnergy += std::abs (outBuf.getSample (0, i)) + std::abs (outBuf.getSample (1, i));
+
+    logTestResult ("Variation Reverb (Hall 1) produces wet reverb tail", tailEnergy > 0.01f);
+
+    // 2. Rotary Speaker (MSB 0x45)
+    p.reset();
+    p.typeMsb = xg::varTypeRotarySpeaker;
+    p.parameters14Bit[0] = 81; // 4.54 Hz (Table#1 default)
+    p.parameters14Bit[1] = 64; // Depth
+    p.parameters14Bit[9] = 127; // 100% wet
+    proc.updateParameters (p);
+
+    logTestResult ("Rotary Speaker speed decodes to 4.54 Hz from Table#1",
+                   isNear (proc.getRotarySpeedHzForTest(), 4.54f, 0.01f));
+
+    inBuf.clear();
+    outBuf.clear();
+    for (int i = 0; i < 2048; ++i)
+    {
+        const float val = std::sin (2.0f * 3.14159f * 440.0f * i / 44100.0f);
+        inBuf.setSample (0, i, val);
+        inBuf.setSample (1, i, val);
+    }
+    proc.process (inBuf, outBuf, 2048);
+
+    // Rotary creates stereo difference between L and R channels due to complementary phase/amp modulation
+    float stereoDiff = 0.0f;
+    for (int i = 200; i < 2048; ++i)
+        stereoDiff += std::abs (outBuf.getSample (0, i) - outBuf.getSample (1, i));
+
+    logTestResult ("Rotary Speaker introduces stereo modulation difference", stereoDiff > 1.0f);
+
+    // 3. 3-Band EQ (MSB 0x4C)
+    p.reset();
+    p.typeMsb = xg::varType3BandEq;
+    p.parameters14Bit[0] = 76; // Low Gain = +12 dB
+    p.parameters14Bit[1] = 34; // Mid Freq = 1.0 kHz
+    p.parameters14Bit[2] = 64; // Mid Gain = 0 dB
+    p.parameters14Bit[3] = 10; // Mid Q = 1.0
+    p.parameters14Bit[4] = 64; // High Gain = 0 dB
+    p.parameters14Bit[5] = 28; // Low Freq = 500 Hz
+    p.parameters14Bit[6] = 46; // High Freq = 4.0 kHz
+    p.parameters14Bit[9] = 127; // 100% wet
+    proc.updateParameters (p);
+
+    // Feed 100Hz low frequency sine wave
+    inBuf.clear();
+    outBuf.clear();
+    for (int i = 0; i < 512; ++i)
+    {
+        const float val = std::sin (2.0f * 3.14159f * 100.0f * i / 44100.0f);
+        inBuf.setSample (0, i, val);
+        inBuf.setSample (1, i, val);
+    }
+    proc.process (inBuf, outBuf, 512);
+
+    // Output low frequency amplitude should be boosted (greater than 1.0)
+    float maxAmp = 0.0f;
+    for (int i = 100; i < 512; ++i)
+        maxAmp = std::max (maxAmp, std::abs (outBuf.getSample (0, i)));
+
+    logTestResult ("3-Band EQ boosts low frequency by ~+12dB", maxAmp > 2.0f);
+
+    // 4. 2-Band EQ (MSB 0x4D)
+    p.reset();
+    p.typeMsb = xg::varType2BandEq;
+    p.parameters14Bit[0] = 28; // Low Freq = 500 Hz
+    p.parameters14Bit[1] = 76; // Low Gain = +12 dB
+    p.parameters14Bit[2] = 46; // High Freq = 4.0 kHz
+    p.parameters14Bit[3] = 64; // High Gain = 0 dB
+    p.parameters14Bit[9] = 127;
+    proc.updateParameters (p);
+    proc.process (inBuf, outBuf, 512);
+
+    maxAmp = 0.0f;
+    for (int i = 100; i < 512; ++i)
+        maxAmp = std::max (maxAmp, std::abs (outBuf.getSample (0, i)));
+
+    logTestResult ("2-Band EQ functions correctly and boosts low freq", maxAmp > 2.0f);
+}
+
+// =============================================================================
+// TEST-S02 / TEST-U03: Variation Subtypes and Parameters 11-16 (Post-EQ)
+// =============================================================================
+void testS02_U03_SubtypesAndParameters11To16()
+{
+    std::cout << "\n=== TEST-S02 / TEST-U03: Variation Subtypes and Params 11-16 ===" << std::endl;
+
+    VariationEffectProcessor proc;
+    proc.prepare (44100.0, 512);
+
+    xg::VariationParameters p;
+
+    // 1. Post-EQ activation via Param 11-13 (Mid EQ)
+    p.reset();
+    p.typeMsb = xg::varTypeFlanger;
+    p.parameters11To16[0] = 40; // Mid Freq = 2.0 kHz
+    p.parameters11To16[1] = 76; // Mid Gain = +12 dB (non-zero)
+    p.parameters11To16[2] = 10; // Mid Q = 1.0
+    proc.updateParameters (p);
+
+    logTestResult ("Non-zero Mid EQ on Param 11-13 activates Post-EQ", proc.isPostEqActiveForTest() == true);
+
+    // 2. Post-EQ inactive when gains are 64 (0 dB)
+    p.parameters11To16[1] = 64; // Mid Gain = 0 dB
+    p.parameters14Bit[6] = 64;  // Low Gain = 0 dB
+    p.parameters14Bit[8] = 64;  // High Gain = 0 dB
+    proc.updateParameters (p);
+    logTestResult ("Zero-gain EQ leaves Post-EQ inactive", proc.isPostEqActiveForTest() == false);
+
+    // 3. Post-EQ activation on Delay LCR via Param 13-16 (Low/High EQ)
+    p.reset();
+    p.typeMsb = xg::varTypeDelayLCR;
+    p.parameters11To16[3] = 74; // Low Gain = +10 dB
+    proc.updateParameters (p);
+    logTestResult ("Delay LCR Param 14 (Low Gain) activates Post-EQ", proc.isPostEqActiveForTest() == true);
+
+    // 4. Subtype LSB differences (Distortion vs Stereo Distortion)
+    p.reset();
+    p.typeMsb = xg::varTypeDistortion;
+    p.typeLsb = 0x00; // Mono Distortion
+    proc.updateParameters (p);
+    logTestResult ("Distortion LSB 0x00 stored as currentTypeLsb", proc.getCurrentTypeLsb() == 0x00);
+
+    p.typeLsb = 0x02; // Stereo Distortion
+    proc.updateParameters (p);
+    logTestResult ("Distortion LSB 0x02 stored as currentTypeLsb", proc.getCurrentTypeLsb() == 0x02);
+}
+
 int main()
 {
     std::cout << "=======================================================" << std::endl;
-    std::cout << "    GMSynth XG Compliance Phase 1 Regression Tests     " << std::endl;
+    std::cout << "    GMSynth XG Compliance Regression Test Suite        " << std::endl;
     std::cout << "=======================================================" << std::endl;
 
+    // Phase 1 Tests
     testE01_VariationTypeMsbConstants();
     testE03_EffectDefaultTables();
     testE04_ZeroValueHandling();
@@ -365,6 +690,12 @@ int main()
     testE09_MultiEqPresets();
     testE10_MultiPartResetValues();
     testE08_PartModeDrums34Ignored();
+
+    // Phase 2 Tests
+    testE02_DelayFamilySpecialization();
+    testS01_PhysicalMappingReverbChorus();
+    testU02_EssentialVariationTypes();
+    testS02_U03_SubtypesAndParameters11To16();
 
     std::cout << "\n=======================================================" << std::endl;
     std::cout << "  TOTAL: " << (gPassedTests + gFailedTests)

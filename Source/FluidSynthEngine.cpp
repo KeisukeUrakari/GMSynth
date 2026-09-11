@@ -831,89 +831,31 @@ void FluidSynthEngine::updateReverbSettings() noexcept
         p.wetLevel = 0.0f;
         p.dryLevel = 0.0f;
         p.roomSize = 0.0f;
+        p.damping = 0.0f;
         reverbProcessor.setParameters (p);
+        appliedReverbRoomSize = 0.0f;
+        appliedReverbDamping = 0.0f;
         return;
     }
 
-    float baseRoom = 0.6f;
-    float baseDamp = 0.4f;
-    float baseWidth = 1.0f;
+    // Param 1: Reverb Time (Table#4: 0..69 -> 0.3s .. 30.0s)
+    const float revTimeSec = xg::tables::lookupReverbTime (reverbParameters.parameters[0]);
+    // Logarithmic mapping from [0.3, 30.0]s to Freeverb roomSize [0.10, 0.98]
+    const float norm = std::log (juce::jmax (0.3f, revTimeSec) / 0.3f) / std::log (30.0f / 0.3f);
+    const float roomSize = juce::jlimit (0.05f, 0.98f, 0.10f + 0.88f * std::pow (norm, 0.75f));
 
-    switch (reverbParameters.typeMsb)
-    {
-        case 0x01: // Hall 1, Hall 2
-            baseRoom = (reverbParameters.typeLsb == 1) ? 0.85f : 0.75f;
-            baseDamp = 0.35f;
-            baseWidth = 1.0f;
-            break;
+    // Param 5: LPF Cutoff Frequency (Table#3: 1.0kHz .. 20.0kHz)
+    const float lpfCutoffHz = xg::tables::lookupEqFrequency (reverbParameters.parameters[4]);
+    // Freeverb damping: 0.0 = bright (high cutoff / 20kHz), 1.0 = dark (low cutoff / 1kHz)
+    const float dampNorm = 1.0f - (std::log10 (juce::jlimit (1000.0f, 20000.0f, lpfCutoffHz) / 1000.0f) / std::log10 (20.0f));
+    const float damping = juce::jlimit (0.0f, 1.0f, dampNorm);
 
-        case 0x02: // Room 1, Room 2, Room 3
-            if (reverbParameters.typeLsb == 1)      baseRoom = 0.35f; // Room 2
-            else if (reverbParameters.typeLsb >= 2) baseRoom = 0.45f; // Room 3
-            else                                    baseRoom = 0.30f; // Room 1
-            baseDamp = 0.55f;
-            baseWidth = 0.85f;
-            break;
-
-        case 0x03: // Stage 1, Stage 2
-            baseRoom = (reverbParameters.typeLsb == 1) ? 0.65f : 0.55f;
-            baseDamp = 0.30f;
-            baseWidth = 0.95f;
-            break;
-
-        case 0x04: // Plate
-            baseRoom = 0.50f;
-            baseDamp = 0.15f; // bright plate
-            baseWidth = 1.0f;
-            break;
-
-        case 0x10: // White Room (dead room)
-            baseRoom = 0.25f;
-            baseDamp = 0.80f;
-            baseWidth = 0.70f;
-            break;
-
-        case 0x11: // Tunnel
-            baseRoom = 0.88f;
-            baseDamp = 0.25f;
-            baseWidth = 0.90f;
-            break;
-
-        case 0x12: // Canyon
-            baseRoom = 0.95f;
-            baseDamp = 0.20f;
-            baseWidth = 1.0f;
-            break;
-
-        case 0x13: // Basement
-            baseRoom = 0.28f;
-            baseDamp = 0.65f;
-            baseWidth = 0.60f;
-            break;
-
-        default:
-            baseRoom = 0.60f;
-            baseDamp = 0.40f;
-            baseWidth = 1.0f;
-            break;
-    }
-
-    // Param 1: Reverb Time (0..127, 64 is default)
-    const auto timeParam = reverbParameters.parameters[0] > 0 ? reverbParameters.parameters[0] : 64;
-    const auto timeScale = static_cast<float> (timeParam) / 64.0f;
-    const auto roomSize = juce::jlimit (0.05f, 1.0f, baseRoom * timeScale);
-
-    // Param 5: LPF Cutoff Frequency (0..127) - controls high frequency absorption/damping
-    const auto lpfParam = reverbParameters.parameters[4] > 0 ? reverbParameters.parameters[4] : 64;
-    const auto lpfFactor = 1.0f - (static_cast<float> (lpfParam) / 127.0f);
-    const auto damping = juce::jlimit (0.0f, 1.0f, baseDamp * 0.6f + lpfFactor * 0.4f);
-
-    // Param 6: Width (0..127, or diffusion from param 2)
-    float width = baseWidth;
+    // Param 6: Width / Diffusion (0..127)
+    float width = 1.0f;
     if (reverbParameters.parameters[5] > 0)
-        width = juce::jlimit (0.0f, 1.0f, static_cast<float> (reverbParameters.parameters[5]) / 64.0f * baseWidth);
+        width = juce::jlimit (0.0f, 1.0f, static_cast<float> (reverbParameters.parameters[5]) / 64.0f);
     else if (reverbParameters.parameters[1] > 0) // Diffusion
-        width = juce::jlimit (0.2f, 1.0f, static_cast<float> (reverbParameters.parameters[1]) / 10.0f * baseWidth);
+        width = juce::jlimit (0.2f, 1.0f, static_cast<float> (reverbParameters.parameters[1]) / 10.0f);
 
     juce::dsp::Reverb::Parameters params;
     params.roomSize = roomSize;
@@ -924,6 +866,8 @@ void FluidSynthEngine::updateReverbSettings() noexcept
     params.freezeMode = 0.0f;
 
     reverbProcessor.setParameters (params);
+    appliedReverbRoomSize = roomSize;
+    appliedReverbDamping = damping;
 }
 
 void FluidSynthEngine::updateGsReverbSettings() noexcept
@@ -1004,81 +948,34 @@ void FluidSynthEngine::updateChorusSettings() noexcept
     if (chorusParameters.typeMsb == 0x00)
     {
         chorusProcessor.setMix (0.0f);
+        appliedChorusDepth = 0.0f;
+        appliedChorusRate = 0.0f;
+        appliedChorusDelay = 0.0f;
         return;
     }
 
-    float baseRateHz = 1.0f;
-    float baseDepth = 0.25f;
-    float baseDelayMs = 7.0f;
-    float baseFeedback = 0.0f;
-
-    switch (chorusParameters.typeMsb)
-    {
-        case 0x41: // Chorus 1..4
-            if (chorusParameters.typeLsb == 1)      { baseRateHz = 0.9f; baseDepth = 0.25f; baseDelayMs = 8.0f; }
-            else if (chorusParameters.typeLsb == 2) { baseRateHz = 1.1f; baseDepth = 0.32f; baseDelayMs = 9.0f; }
-            else if (chorusParameters.typeLsb >= 3) { baseRateHz = 1.3f; baseDepth = 0.40f; baseDelayMs = 10.0f; }
-            else                                    { baseRateHz = 0.8f; baseDepth = 0.20f; baseDelayMs = 7.0f; }
-            baseFeedback = 0.05f;
-            break;
-
-        case 0x42: // Celeste 1..4 (faster rate, lighter depth, spatial swirl)
-            if (chorusParameters.typeLsb == 1)      { baseRateHz = 1.8f; baseDepth = 0.18f; baseDelayMs = 4.5f; }
-            else if (chorusParameters.typeLsb >= 2) { baseRateHz = 2.2f; baseDepth = 0.22f; baseDelayMs = 5.0f; }
-            else                                    { baseRateHz = 1.5f; baseDepth = 0.15f; baseDelayMs = 4.0f; }
-            baseFeedback = 0.0f;
-            break;
-
-        case 0x43: // Flanger 1..3 (shorter delay, high feedback)
-            if (chorusParameters.typeLsb == 1)      { baseRateHz = 0.3f; baseDepth = 0.50f; baseDelayMs = 2.0f; baseFeedback = 0.70f; }
-            else if (chorusParameters.typeLsb >= 2) { baseRateHz = 0.4f; baseDepth = 0.60f; baseDelayMs = 2.5f; baseFeedback = 0.75f; }
-            else                                    { baseRateHz = 0.2f; baseDepth = 0.45f; baseDelayMs = 1.8f; baseFeedback = 0.65f; }
-            break;
-
-        case 0x44: // Symphonic 1..2 (rich ensemble modulation)
-            baseRateHz = (chorusParameters.typeLsb >= 1) ? 0.8f : 0.65f;
-            baseDepth = (chorusParameters.typeLsb >= 1) ? 0.45f : 0.38f;
-            baseDelayMs = 14.0f;
-            baseFeedback = 0.0f;
-            break;
-
-        default:
-            baseRateHz = 1.0f;
-            baseDepth = 0.25f;
-            baseDelayMs = 7.0f;
-            baseFeedback = 0.0f;
-            break;
-    }
-
-    // Param 1: LFO Frequency (0..127 -> 0.05..15.0 Hz)
-    float rateHz = baseRateHz;
-    if (chorusParameters.parameters[0] > 0)
-    {
-        const auto speedNorm = static_cast<float> (chorusParameters.parameters[0]) / 127.0f;
-        rateHz = juce::jlimit (0.05f, 15.0f, 0.1f + speedNorm * speedNorm * 6.0f * (baseRateHz / 1.0f));
-    }
+    // Param 1: LFO Frequency (Table#1: 0..127 -> 0.00Hz .. 39.7Hz)
+    const float rateHz = xg::tables::lookupLfoFrequency (chorusParameters.parameters[0]);
 
     // Param 2: LFO Depth (0..127)
     const auto depthNorm = juce::jlimit (0.0f, 1.0f, static_cast<float> (chorusParameters.parameters[1]) / 127.0f);
 
     // Param 3: Feedback (1..127 -> -63..+63, 64 = 0)
-    float feedback = baseFeedback;
+    float feedback = 0.0f;
     if (chorusParameters.parameters[2] > 0)
     {
         const auto fbVal = static_cast<int> (chorusParameters.parameters[2]);
-        feedback = juce::jlimit (-0.85f, 0.85f, static_cast<float> (fbVal - 64) / 64.0f * 0.8f);
+        feedback = juce::jlimit (-0.85f, 0.85f, static_cast<float> (fbVal - 64) / 64.0f * 0.85f);
     }
 
-    // Param 4: Delay Offset (0..127 -> 0.5..45.0 ms)
-    float delayMs = baseDelayMs;
-    if (chorusParameters.parameters[3] > 0)
-    {
-        delayMs = juce::jlimit (0.5f, 45.0f, static_cast<float> (chorusParameters.parameters[3]) / 127.0f * 35.0f + 0.5f);
-    }
+    // Param 4: Modulation Delay Offset (Table#2: 0..127 -> 0.0ms .. 50.0ms)
+    const float delayMs = juce::jmax (0.1f, xg::tables::lookupModDelayOffset (chorusParameters.parameters[3]));
 
-    chorusProcessor.setRate (rateHz);
-    chorusProcessor.setDepth (depthNorm);
+    chorusProcessor.setRate (juce::jmax (0.001f, rateHz));
+    chorusProcessor.setDepth (rateHz > 0.0f ? depthNorm : 0.0f);
     appliedChorusDepth = depthNorm;
+    appliedChorusRate = rateHz;
+    appliedChorusDelay = delayMs;
     chorusProcessor.setCentreDelay (delayMs);
     chorusProcessor.setFeedback (feedback);
     chorusProcessor.setMix (1.0f);

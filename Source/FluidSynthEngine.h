@@ -108,6 +108,10 @@ public:
         return channelPartMode[static_cast<size_t> (channel)].load (std::memory_order_acquire);
     }
     float getChorusProcessorDepthForTest() const noexcept { return appliedChorusDepth; }
+    float getChorusProcessorRateForTest() const noexcept { return appliedChorusRate; }
+    float getChorusProcessorDelayForTest() const noexcept { return appliedChorusDelay; }
+    float getReverbProcessorRoomSizeForTest() const noexcept { return appliedReverbRoomSize; }
+    float getReverbProcessorDampingForTest() const noexcept { return appliedReverbDamping; }
     static float testConvertEffectSendLevel (uint8_t sendVal) noexcept;
     void handleSysExForTest (const juce::uint8* data, int numBytes) noexcept
     {
@@ -366,8 +370,12 @@ private:
     std::array<PartEq, numMidiChannels> partEqs;
 
     juce::dsp::Reverb reverbProcessor;
+    float appliedReverbRoomSize = 0.0f;
+    float appliedReverbDamping = 0.0f;
     juce::dsp::Chorus<float> chorusProcessor;
     float appliedChorusDepth = 0.0f;
+    float appliedChorusRate = 0.0f;
+    float appliedChorusDelay = 0.0f;
     VariationEffectProcessor variationProcessor;
 
     std::array<AuxDrumSlot, numAuxDrumChannels> auxDrumSlots;

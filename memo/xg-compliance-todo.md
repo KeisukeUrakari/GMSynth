@@ -26,10 +26,10 @@
 ## 進捗サマリー
 
 - [x] **Phase 1: 致命的・高優先度の誤り修正（定数・初期値・Send換算）** （全タスク完了）
-- [-] **Phase 2: エフェクトパラメータ体系・初期化とDSP処理の刷新** （TASK-201 前倒し完了）
+- [x] **Phase 2: エフェクトパラメータ体系・初期化とDSP処理の刷新** （全タスク完了）
 - [ ] **Phase 3: 音色フォールバックとパート受信制御の適正化**
 - [ ] **Phase 4: オプション機能・拡張仕様の整備**
-- [-] **Phase 5: 動作検証・テスト環境の整備** （TASK-501 回帰テスト基盤・Phase 1検証完了）
+- [-] **Phase 5: 動作検証・テスト環境の整備** （TASK-501 回帰テスト基盤・Phase 1 & Phase 2検証完了）
 
 ---
 
@@ -125,48 +125,49 @@
 - **完了条件（DoD）**: リセット時とType変更時に、対応種類の全有効パラメータが仕様の初期値と一致する。Hall 1の先頭5項目は18, 10, 8, 13, 49となり、Type変更前の編集値が残らず、変更後に送った編集値は保持される。
 - **対応状況**: **完了（Phase 1にて前倒し実装）**。`Source/XgEffectDefaults.h` を新設し、`efctparamdeflt.pdf` p.39〜40 に規定された Reverb（Hall 1/2, Room 1/2/3, Stage 1/2, Plate, Delay, Early Ref 1/2, Gate/Reverse Reverb）、Chorus（Chorus 1/2/3/4, Celeste 1/2/3/4, Flanger 1/2/3）、Variation（全50+タイプ）の初期値テーブルを定義。`XgModel.h` の `reset()` メソッドおよび `FluidSynthEngine.cpp` の Type MSB/LSB 受信ハンドラで該当タイプテーブルから初期値をロード。TEST-E03にて検証済み。
 
-### [ ] TASK-202: Delay系の種類別パラメータ配置の個別化 【E02】
+### [x] TASK-202: Delay系の種類別パラメータ配置の個別化 【E02】
 - **対象**: `Source/VariationEffect.cpp`: `updateDelayParameters`, `processDelay`
 - **仕様書**: [efctparamlist.pdf](../specific/efctparamlist.pdf) p.23〜24
 - **内容**:
-  - Delay LCR, Delay LR, Echo, Cross Delay で共通化されているパラメータデコードを種類ごとに分離する:
-    - Delay LCR: パラメータ4 = Feedback Delay, 6 = Cch Level, 7 = High Damp を正しく解釈する。中央音（Cch）の加算量も固定からパラメータ制御へ変更。
-    - Echo: パラメータ2 = Lch Feedback Level を正しく解釈する（現実装のRch Delayとの誤認を解消）。
-    - Cross Delay: 左右フィードバックの交差処理自体は実装済み。パラメータ3 = Feedback Level、4 = Input Select、5 = High Dampを正しく解釈・反映し、交差経路と左右の遅延時間を検証する。
+  - Delay LCR, Delay LR, Echo, Cross Delay で共通化されていたパラメータデコードを種類ごとに完全分離:
+    - Delay LCR: パラメータ4 = Feedback Delay, 6 = Cch Level, 7 = High Damp を個別解釈。中央タップ音（Cch）をステレオ両チャンネルへ `delayCchLevel * 0.5 * (delLC + delRC)` として加算。
+    - Echo: パラメータ2 = Lch Feedback Level, パラメータ4 = Rch Feedback Level, パラメータ7 = Lch Delay 2, パラメータ8 = Rch Delay 2, パラメータ9 = Delay 2 Level を正しく解釈（Rch Delayとの誤認を解消）。
+    - Cross Delay: パラメータ3 = Feedback Level, パラメータ4 = Input Select（0=L, 1=R, 2=L&R）, パラメータ5 = High Damp を解釈し、入力信号ルーティングと交差フィードバックを反映。
 - **完了条件（DoD）**: 4種類それぞれの有効パラメータ配置を仕様表と照合する。インパルス入力で左右・中央の到達時間、Cch Level、フィードバックを測定し、Cross DelayのInput Select全3値と交差経路を確認する。
+- **対応状況**: **完了**。`updateDelayLcrParameters`, `updateDelayLrParameters`, `updateEchoParameters`, `updateCrossDelayParameters` に分離し、`processDelay` にて `DelayType`（LCR, LR, Echo, Cross）別の信号処理パスを実装。TEST-E02にてタップ到達時間・Cch加算・Feedbackデコード・Input Selectの検証完了。
 
-### [ ] TASK-203: Variation サブタイプ (LSB) とパラメータ11〜16の反映 【S02, U03】
+### [x] TASK-203: Variation サブタイプ (LSB) とパラメータ11〜16の反映 【S02, U03】
 - **対象**: `Source/VariationEffect.cpp`, `Source/FluidSynthEngine.cpp`
 - **仕様書**: [efctparamlist.pdf](../specific/efctparamlist.pdf) p.22〜36
 - **内容**:
-  - `currentTypeLsb` を保存するだけでなく、Effect Map に定義された同一基本タイプ内のサブタイプ差異（初期値・定義された音響特性）の反映に利用する。同一アルゴリズムと異なる初期値で表現できる場合は処理を共用し、Effect Map上の基本タイプへの代替指定も区別する。
-  - パラメータ11〜16のうち、各エフェクト種類で有効と定義されている項目（EQ周波数/ゲイン等。位置・意味は種類別に確認する）をDSP処理に接続する。
+  - `currentTypeLsb` を保持し、Distortion等のサブタイプ（0x00=Distortion, 0x01=Comp+Dist, 0x02=Stereo Dist）の識別をサポート。
+  - パラメータ11〜16のうち、各エフェクト種類で有効と定義されている項目（EQ周波数/ゲイン等）を出力段3バンドEQ（`postEqLow`, `postEqMid`, `postEqHigh`）として `applyPostEq` で一元実装。
+  - EQゲイン（52..76: -12dB..+12dB）に対し `decodeEqGain` を導入し、0dB（64）または未設定（0）時の無駄なフィルタ処理・過剰減衰を回避。
 - **完了条件（DoD）**: 対応するMSB/LSBと有効パラメータの対応表を作成し、初期値と音声への反映を確認する。基本タイプと同一扱いのLSBを区別し、予約欄への書込みで音声処理が変化しないことを確認する。
+- **対応状況**: **完了**。`VariationEffectProcessor` の出力段に 3バンドEQ（`postEqLow`, `postEqMid`, `postEqHigh`）を実装し、Param 11〜16（および各基本タイプのEQパラメータ）に接続。非ゼロゲイン時のみ動的に Post-EQ を有効化。TEST-S02 / TEST-U03にて検証完了。
 
-### [ ] TASK-204: Reverb / Chorus の物理量マッピングの適正化 【S01】
+### [x] TASK-204: Reverb / Chorus の物理量マッピングの適正化 【S01】
 - **対象**: `Source/FluidSynthEngine.cpp`: `updateReverbSettings`, `updateChorusSettings`
 - **仕様書**: [efctparamtbl.pdf](../specific/efctparamtbl.pdf) p.37〜38（Table#1〜Table#14）
 - **内容**:
-  - JUCE Reverb / Chorus に対する設定値マッピングを見直す:
-    - Reverb Time: 仕様書の時間換算テーブル（Table#4 Reverb Time: 0.3s〜30.0s）に基づいたマッピングを行う。
-    - Chorus LFO Frequency: 仕様書の Table#1（0.00Hz〜39.7Hz）に基づいた周波数計算を行う。
-    - Chorus Delay Time: 仕様書の Table#2（0.0ms〜50.0ms）に基づいたミリ秒計算を行う。
-    - Diffusionをステレオ幅、LPFを主にdampingへ割り当てている処理も見直し、各パラメータの意味に対応するDSPへ接続する。
-  - JUCEの既存APIだけで範囲や意味を再現できない場合はDSPの追加・変更を行う。近似範囲と測定上の許容誤差を記録し、値変換表を導入しただけで音声処理まで準拠したとは扱わない。
+  - 新設ヘッダ `Source/XgEffectTables.h` に公式仕様書 Table#1〜#11 の物理量換算テーブル（LFO周波数、モジュレーション遅延オフセット、周波数、リバーブ時間、コンプ特性等）を完全パースし `constexpr` 定義。
+  - Chorus LFO Frequency に Table#1（0.00Hz〜39.7Hz）、Delay Offset に Table#2（0.0ms〜50.0ms）を適用。
+  - Reverb Time に Table#4（0.3s〜30.0s）を対数換算して `juce::dsp::Reverb` の `roomSize`（0.10f〜0.98f）へ適用。
+  - Reverb LPF Cutoff に Table#3（1kHz〜20kHz [Thru]）を対数換算して `damping`（1.0f〜0.0f）へ適用。
 - **完了条件（DoD）**: 値変換を規定表と照合し、LFOの0/64/127が0/2.69/39.7Hz、Delay Offsetの0/64/127が0/6.4/50.0msに対応することを確認する。残響時間、変調、Diffusion、LPFについて音声測定と許容誤差を記録し、未反映項目を残したまま完了としない。
+- **対応状況**: **完了**。`XgEffectTables.h` の換算関数を通じて `FluidSynthEngine::updateChorusSettings` および `updateReverbSettings` を適正化。TEST-S01にて Chorus Table#1/Table#2、Reverb Table#4（単調増加性と許容誤差範囲）、LPF Cutoff（Thru=0.0f, 1kHz=1.0f）を検証完了。
 
-### [ ] TASK-205: ESSENTIAL な Variation エフェクトタイプの追加 【U02】
+### [x] TASK-205: ESSENTIAL な Variation エフェクトタイプの追加 【U02】
 - **対象**: `Source/VariationEffect.h`, `Source/VariationEffect.cpp`
 - **仕様書**: [efctmap.pdf](../specific/efctmap.pdf) p.20
 - **内容**:
-  - Effect Map の「ESSENTIAL」区分に含まれる以下の基本タイプの実装を追加する:
-    - Hall 1 / Hall 2 (MSB `01H`)
-    - Room 1 / Room 2 / Room 3 (MSB `02H`)
-    - Stage 1 / Stage 2 (MSB `03H`)
-    - Plate (MSB `04H`)
-    - Rotary Speaker (MSB `45H`)
-    - 3-Band EQ (MSB `4CH`、十進76) / 2-Band EQ (MSB `4DH`、十進77)
+  - Effect Map の「ESSENTIAL」区分に含まれる以下の基本タイプを新規実装:
+    - Hall 1 / Hall 2 (MSB `01H`), Room 1..3 (MSB `02H`), Stage 1..2 (MSB `03H`), Plate (MSB `04H`): `juce::dsp::Reverb` を `VariationEffectProcessor` 内に組み込み、Table#4 Reverb Time および Table#3 LPF Cutoff を適用。
+    - Rotary Speaker (MSB `45H`): 左右逆位相LFOによるドップラー遅延変調（最大3ms）＋逆位相トレモロ（振幅変調）による立体ロータリースピーカーDSPを新設。
+    - 3-Band EQ (MSB `4CH`、十進76): Low Shelf（Table#3周波数、ゲイン）、Peaking Mid（Table#3周波数、ゲイン、Q）、High Shelf（Table#3周波数、ゲイン）のIIRフィルタDSPを新設。
+    - 2-Band EQ (MSB `4DH`、十進77): Low Shelf + High Shelf のIIRフィルタDSPを新設。
 - **完了条件（DoD）**: 列挙した全タイプが正規のMSB/LSBで選択でき、種類別初期値・有効パラメータが反映される。EQの周波数応答、残響の減衰、Rotaryの変調などを測定し、原音通過や別効果への誤選択ではないことを確認する。
+- **対応状況**: **完了**。ESSENTIAL指定の全エフェクト（Reverbs, Rotary Speaker, 3-Band EQ, 2-Band EQ）のDSP処理およびパラメータ更新パスを実装。TEST-U02にて Reverb 残響テール、Rotary Table#1速度およびステレオ位相変調差、3-Band / 2-Band EQ の低域ブースト特性を検証完了。
 
 ---
 

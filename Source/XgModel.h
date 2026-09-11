@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include "XgEffectDefaults.h"
+#include "XgEffectTables.h"
 
 namespace xg
 {
@@ -391,6 +392,10 @@ namespace xg
     };
 
     constexpr uint8_t varTypeThru         = 0x00;
+    constexpr uint8_t varTypeHall1        = 0x01;
+    constexpr uint8_t varTypeRoom1        = 0x02;
+    constexpr uint8_t varTypeStage1       = 0x03;
+    constexpr uint8_t varTypePlate        = 0x04;
     constexpr uint8_t varTypeDelayLCR     = 0x05;
     constexpr uint8_t varTypeDelayLR      = 0x06;
     constexpr uint8_t varTypeEcho         = 0x07;
@@ -398,12 +403,15 @@ namespace xg
     constexpr uint8_t varTypeChorus       = 0x41;
     constexpr uint8_t varTypeFlanger      = 0x43;
     constexpr uint8_t varTypeSymphonic    = 0x44;
+    constexpr uint8_t varTypeRotarySpeaker= 0x45;
     constexpr uint8_t varTypeTremolo      = 0x46;
     constexpr uint8_t varTypeAutoPan      = 0x47;
     constexpr uint8_t varTypePhaser       = 0x48;
     constexpr uint8_t varTypeDistortion   = 0x49;
     constexpr uint8_t varTypeOverdrive    = 0x4A;
     constexpr uint8_t varTypeAmpSimulator = 0x4B;
+    constexpr uint8_t varType3BandEq      = 0x4C;
+    constexpr uint8_t varType2BandEq      = 0x4D;
     constexpr uint8_t varTypeAutoWah      = 0x4E;
 
     struct VariationParameters
