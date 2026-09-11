@@ -2339,6 +2339,118 @@ void testE06_MultiPartRoutingSameNoteAssignElementReserve()
     logTestResult ("Part 2 Element Reserve set to 0", engine.getPartElementReserveForTest (1) == 0);
 }
 
+// efctparamlist.pdf p.30: Amp Simulator and Stereo Amp Simulator share
+// P2 AMP Type, P3 LPF, P4 Output Level; P5..9 and P12..16 are reserved.
+void testAmpSimulatorParameterLayout()
+{
+    std::cout << "\n=== Amp Simulator: specification parameter layout ===" << std::endl;
+    constexpr int blockSize = 512;
+    constexpr int blocks = 16;
+    for (const uint8_t lsb : { uint8_t (0x00), uint8_t (0x08) })
+    {
+        const std::string label = lsb == 0 ? "Amp Simulator" : "Stereo Amp Simulator";
+        FluidSynthEngine engine;
+        const uint8_t type[] = {0xF0,0x43,0x10,0x4C,0x02,0x01,0x40,0x4B,lsb,0xF7};
+        engine.handleSysExForTest (type, sizeof (type));
+        auto writeParameter = [&] (int number, int value)
+        {
+            const uint8_t message[] = {0xF0,0x43,0x10,0x4C,0x02,0x01,
+                static_cast<uint8_t> (0x42 + 2 * (number - 1)),
+                static_cast<uint8_t> (value >> 7), static_cast<uint8_t> (value & 127),0xF7};
+            engine.handleSysExForTest (message, sizeof (message));
+        };
+        writeParameter (1, 0); // Minimum drive isolates the filter response.
+        writeParameter (2, 1);
+        writeParameter (3, 60); // Thru
+        writeParameter (4, 100);
+        writeParameter (10, 127); // Fully wet
+        const auto baseline = engine.getVariationParametersForTest();
+        logTestResult (label + " SysEx P2/P3/P4 reach the correct slots",
+                       baseline.parameters14Bit[1] == 1 && baseline.parameters14Bit[2] == 60
+                       && baseline.parameters14Bit[3] == 100);
+
+        // Fresh processor per render avoids phase/filter-history differences.
+        auto render = [&] (const xg::VariationParameters& params, float frequency)
+        {
+            VariationEffectProcessor processor;
+            processor.prepare (44100.0, blockSize);
+            processor.updateParameters (params);
+            juce::AudioBuffer<float> input (2, blockSize), output (2, blockSize);
+            juce::AudioBuffer<float> result (2, blockSize * blocks);
+            for (int b = 0; b < blocks; ++b)
+            {
+                for (int i = 0; i < blockSize; ++i)
+                {
+                    const float sample = 0.05f * std::sin (2.0f * juce::MathConstants<float>::pi
+                        * frequency * static_cast<float> (b * blockSize + i) / 44100.0f);
+                    input.setSample (0, i, sample);
+                    input.setSample (1, i, sample * 0.7f);
+                }
+                processor.process (input, output, blockSize);
+                for (int ch = 0; ch < 2; ++ch)
+                    result.copyFrom (ch, b * blockSize, output, ch, 0, blockSize);
+            }
+            return result;
+        };
+        auto rms = [] (const juce::AudioBuffer<float>& buffer)
+        {
+            return buffer.getRMSLevel (0, buffer.getNumSamples() / 2, buffer.getNumSamples() / 2);
+        };
+        auto difference = [] (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b)
+        {
+            double sum = 0.0;
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < a.getNumSamples(); ++i)
+                    sum += std::abs (a.getSample (ch, i) - b.getSample (ch, i));
+            return sum / (2 * a.getNumSamples());
+        };
+        const auto reference = render (baseline, 1000.0f);
+        logTestResult (label + " positive Output Level produces audio", rms (reference) > 1.0e-5f);
+        writeParameter (4, 0);
+        logTestResult (label + " P4 Output Level=0 silences wet output",
+                       rms (render (engine.getVariationParametersForTest(), 1000.0f)) < 1.0e-7f);
+        writeParameter (4, 25);
+        const float quiet = rms (render (engine.getVariationParametersForTest(), 1000.0f));
+        logTestResult (label + " P4 Output Level controls output amplitude",
+                       quiet > 1.0e-7f && rms (reference) > quiet * 2.0f);
+
+        writeParameter (4, 100);
+        writeParameter (3, 34); // Table#3: 1 kHz, versus Thru at 60.
+        const auto filtered = engine.getVariationParametersForTest();
+        const float highThru = rms (render (baseline, 8000.0f));
+        const float highCut = rms (render (filtered, 8000.0f));
+        const float lowThru = rms (render (baseline, 200.0f));
+        const float lowCut = rms (render (filtered, 200.0f));
+        logTestResult (label + " P3 LPF suppresses 8 kHz relative to 200 Hz",
+                       highThru > 1.0e-7f && lowThru > 1.0e-7f && lowCut > 1.0e-7f
+                       && highCut / highThru < 0.5f * (lowCut / lowThru));
+        VariationEffectProcessor decoded;
+        decoded.prepare (44100.0, blockSize);
+        decoded.updateParameters (baseline);
+        logTestResult (label + " P2/P3 are not interpreted as Low EQ",
+                       ! decoded.isPostEqActiveForTest());
+
+        auto off = baseline;
+        off.parameters14Bit[1] = 0;
+        const auto offOutput = render (off, 1000.0f);
+        for (int ampType = 1; ampType <= 3; ++ampType)
+        {
+            auto selected = baseline;
+            selected.parameters14Bit[1] = static_cast<uint16_t> (ampType);
+            logTestResult (label + " P2 AMP Type " + std::to_string (ampType) + " differs from Off",
+                           difference (offOutput, render (selected, 1000.0f)) > 1.0e-6);
+        }
+        // Reserved writes must not become output level or EQ controls.
+        for (int number = 5; number <= 9; ++number)
+        {
+            auto changed = baseline;
+            changed.parameters14Bit[static_cast<size_t> (number - 1)] = 76;
+            logTestResult (label + " reserved P" + std::to_string (number) + " leaves audio unchanged",
+                           difference (reference, render (changed, 1000.0f)) < 1.0e-8);
+        }
+    }
+}
+
 // spec.pdf p.14: CC121 resets modulation, expression and pedals, but
 // Volume (CC7) and Pan (CC10) are not reset targets.
 void testCc121_PreservesVolumeAndPan()
@@ -2409,6 +2521,7 @@ int main()
     testE03_EffectDefaultTables();
     testE04_ZeroValueHandling();
     testCc121_PreservesVolumeAndPan();
+    testAmpSimulatorParameterLayout();
     testE05_EffectSendConversion();
     testE09_MultiEqPresets();
     testE10_MultiPartResetValues();

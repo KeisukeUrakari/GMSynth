@@ -222,6 +222,7 @@ private:
     void update3BandEqParameters (const xg::VariationParameters& params);
     void update2BandEqParameters (const xg::VariationParameters& params);
     void updateDistortionParameters (const xg::VariationParameters& params);
+    void updateAmpSimulatorParameters (const xg::VariationParameters& params);
     void updateFlangerParameters (const xg::VariationParameters& params);
     void updatePhaserParameters (const xg::VariationParameters& params);
     void updateTremoloAutoPanParameters (const xg::VariationParameters& params);

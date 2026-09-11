@@ -524,12 +524,6 @@ void VariationEffectProcessor::updateDistortionParameters (const xg::VariationPa
         // Overdrive: LSB 00H = Overdrive (mono/summed), 08H = Stereo Overdrive
         distSubtype = (params.typeLsb == 0x08) ? DistortionSubtype::StereoDist : DistortionSubtype::Standard;
     }
-    else if (currentTypeMsb == xg::varTypeAmpSimulator)
-    {
-        distType = DistortionType::AmpSim;
-        // Amp Sim: LSB 00H = Amp Sim, 08H = Stereo Amp Sim
-        distSubtype = (params.typeLsb == 0x08) ? DistortionSubtype::StereoDist : DistortionSubtype::Standard;
-    }
     else
     {
         distType = DistortionType::Distortion;
@@ -586,8 +580,6 @@ void VariationEffectProcessor::updateDistortionParameters (const xg::VariationPa
     const auto driveVal = static_cast<float> (params.parameters14Bit[0] & 0x7F);
     if (distType == DistortionType::Overdrive)
         distortionDrive = 1.0f + (driveVal / 127.0f) * 25.0f;
-    else if (distType == DistortionType::AmpSim)
-        distortionDrive = 1.0f + (driveVal / 127.0f) * 35.0f;
     else
         distortionDrive = 1.0f + (driveVal / 127.0f) * 50.0f;
 
@@ -595,29 +587,15 @@ void VariationEffectProcessor::updateDistortionParameters (const xg::VariationPa
     distortionOutputGain = (outVal / 64.0f) / std::sqrt (distortionDrive);
 
     const auto nyquist = sampleRate * 0.49;
-    if (distType == DistortionType::AmpSim)
-    {
-        const auto preCoeff = juce::IIRCoefficients::makeHighPass (sampleRate, 120.0);
-        for (auto& f : distPreFilters) f.setCoefficients (preCoeff);
+    const auto preCoeff = juce::IIRCoefficients::makeHighPass (sampleRate, 80.0);
+    for (auto& f : distPreFilters) f.setCoefficients (preCoeff);
 
-        const auto cabCoeff = juce::IIRCoefficients::makeLowPass (sampleRate, juce::jmin (nyquist, 4500.0));
-        for (auto& f : ampSimCabFilters) f.setCoefficients (cabCoeff);
+    const auto lpfParam = params.parameters14Bit[3] > 0 ? static_cast<int> (params.parameters14Bit[3] & 0x7F) : 48;
+    const auto lpfCutoff = juce::jlimit (1000.0, nyquist, static_cast<double> (xg::lookupEqFrequency (lpfParam)));
+    const auto postCoeff = juce::IIRCoefficients::makeLowPass (sampleRate, lpfCutoff);
+    for (auto& f : distPostFilters) f.setCoefficients (postCoeff);
 
-        const auto postCoeff = juce::IIRCoefficients::makeHighPass (sampleRate, 80.0);
-        for (auto& f : distPostFilters) f.setCoefficients (postCoeff);
-    }
-    else
-    {
-        const auto preCoeff = juce::IIRCoefficients::makeHighPass (sampleRate, 80.0);
-        for (auto& f : distPreFilters) f.setCoefficients (preCoeff);
-
-        const auto lpfParam = params.parameters14Bit[3] > 0 ? static_cast<int> (params.parameters14Bit[3] & 0x7F) : 48;
-        const auto lpfCutoff = juce::jlimit (1000.0, nyquist, static_cast<double> (xg::lookupEqFrequency (lpfParam)));
-        const auto postCoeff = juce::IIRCoefficients::makeLowPass (sampleRate, lpfCutoff);
-        for (auto& f : distPostFilters) f.setCoefficients (postCoeff);
-
-        for (auto& f : ampSimCabFilters) f.makeInactive();
-    }
+    for (auto& f : ampSimCabFilters) f.makeInactive();
     distFiltersActive = true;
 
     updateDryWet (static_cast<uint8_t> (params.parameters14Bit[9] & 0x7F), 1.0f);
@@ -629,6 +607,86 @@ void VariationEffectProcessor::updateDistortionParameters (const xg::VariationPa
     const float eqMidGain = xg::tables::decodeEqGain (params.parameters14Bit[7] & 0x7F);
     const float eqMidQ = juce::jmax (0.1f, static_cast<float> (params.parameters14Bit[8] & 0x7F) / 10.0f);
     updatePostEq (eqLowFreq, eqLowGain, eqMidFreq, eqMidGain, eqMidQ, 8000.0f, 0.0f);
+}
+
+void VariationEffectProcessor::updateAmpSimulatorParameters (const xg::VariationParameters& params)
+{
+    distType = DistortionType::AmpSim;
+    // Amp Sim: LSB 00H = Amp Sim, 08H = Stereo Amp Sim
+    distSubtype = (params.typeLsb == 0x08) ? DistortionSubtype::StereoDist : DistortionSubtype::Standard;
+    isStereoDistortion = (distSubtype == DistortionSubtype::StereoDist);
+
+    // Param 11: Edge (Clip Curve) (0..127)
+    distortionEdge = static_cast<float> (params.parameters11To16[0] & 0x7F) / 127.0f;
+
+    // Compressor is not used in Amp Simulator
+    compAttackMs = 7.0f;
+    compReleaseMs = 25.0f;
+    compThreshold = 0.04467f;
+    compRatio = 1.0f;
+    compAttackCoeff = 0.0f;
+    compReleaseCoeff = 0.0f;
+    compEnvelope.fill (0.0f);
+
+    // Param 1: Drive (0..127)
+    const auto driveVal = static_cast<float> (params.parameters14Bit[0] & 0x7F);
+    distortionDrive = 1.0f + (driveVal / 127.0f) * 35.0f;
+
+    // Param 4: Output Level (0..127)
+    const auto outVal = static_cast<float> (params.parameters14Bit[3] & 0x7F);
+    distortionOutputGain = (outVal / 64.0f) / std::sqrt (distortionDrive);
+
+    const auto nyquist = sampleRate * 0.49;
+
+    // Pre-filter: 120Hz high-pass
+    const auto preCoeff = juce::IIRCoefficients::makeHighPass (sampleRate, 120.0);
+    for (auto& f : distPreFilters) f.setCoefficients (preCoeff);
+
+    // Param 2: AMP Type (0: Off, 1: Stack, 2: Combo, 3: Tube)
+    const int ampType = params.parameters14Bit[1] & 0x7F;
+    if (ampType == 1) // Stack
+    {
+        const auto cabCoeff = juce::IIRCoefficients::makeLowPass (sampleRate, juce::jmin (nyquist, 3600.0));
+        for (auto& f : ampSimCabFilters) f.setCoefficients (cabCoeff);
+    }
+    else if (ampType == 2) // Combo
+    {
+        const auto cabCoeff = juce::IIRCoefficients::makeLowPass (sampleRate, juce::jmin (nyquist, 4800.0));
+        for (auto& f : ampSimCabFilters) f.setCoefficients (cabCoeff);
+    }
+    else if (ampType == 3) // Tube
+    {
+        const auto cabCoeff = juce::IIRCoefficients::makeLowPass (sampleRate, juce::jmin (nyquist, 3000.0));
+        for (auto& f : ampSimCabFilters) f.setCoefficients (cabCoeff);
+    }
+    else // 0: Off or invalid
+    {
+        for (auto& f : ampSimCabFilters) f.makeInactive();
+    }
+
+    // Param 3: LPF Cutoff (Table#3: 34..60 -> 1.0k..Thru)
+    const int lpfParam = static_cast<int> (params.parameters14Bit[2] & 0x7F);
+    if (lpfParam >= 60)
+    {
+        for (auto& f : distPostFilters) f.makeInactive();
+    }
+    else
+    {
+        const float lpfCutoffHz = xg::tables::lookupEqFrequency (lpfParam);
+        const auto postCoeff = juce::IIRCoefficients::makeLowPass (sampleRate, juce::jlimit (20.0, nyquist, static_cast<double> (lpfCutoffHz)));
+        for (auto& f : distPostFilters) f.setCoefficients (postCoeff);
+    }
+
+    distFiltersActive = true;
+
+    // Param 10: Dry/Wet Balance (1..127)
+    updateDryWet (static_cast<uint8_t> (params.parameters14Bit[9] & 0x7F), 1.0f);
+
+    // Param 5..9 and 12..16 are reserved -> Post EQ is completely disabled for Amp Simulator
+    postEqActive = false;
+    for (auto& f : postEqLow) f.makeInactive();
+    for (auto& f : postEqMid) f.makeInactive();
+    for (auto& f : postEqHigh) f.makeInactive();
 }
 
 void VariationEffectProcessor::updateFlangerParameters (const xg::VariationParameters& params)
@@ -846,8 +904,11 @@ void VariationEffectProcessor::updateParameters (const xg::VariationParameters& 
 
         case xg::varTypeDistortion:
         case xg::varTypeOverdrive:
-        case xg::varTypeAmpSimulator:
             updateDistortionParameters (params);
+            break;
+
+        case xg::varTypeAmpSimulator:
+            updateAmpSimulatorParameters (params);
             break;
 
         case xg::varTypeFlanger:

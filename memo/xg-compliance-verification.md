@@ -38,12 +38,12 @@
 結果:
 
 ```text
-TOTAL: 421 | PASSED: 421 | FAILED: 0
+TOTAL: 449 | PASSED: 449 | FAILED: 0
 ```
 
 この結果は既存アサーションの成功を示すものであり、全仕様項目の一致を示すものではない。以下の不一致には、現在のテストでは検出できないものが含まれる。
 
-2026-09-12のCC121修正後に再実行した結果。追加したCC121関連19アサーションがすべて成功し、修正前に失敗していた9件が解消した。
+2026-09-12のAmp Simulator修正後に再実行した結果。CC121関連19アサーションに加え、Amp Simulator関連28アサーションもすべて成功した。Amp Simulator修正前に失敗していた12件が解消し、CC121修正後の421件も引き続き成功している。
 
 ## 機能別の対応状況
 
@@ -77,7 +77,7 @@ TOTAL: 421 | PASSED: 421 | FAILED: 0
 | Variation Symphonic                              | 対応しているが誤りがある | Parameter 3のDelay OffsetをFeedbackとして解釈                                  |
 | Delay LCR／LR／Echo／Cross Delay                 | 一部対応                 | 主要タップ・フィードバックは実装・検査済み。Parameter 11／12のHPF・LPFが未反映 |
 | Distortion／Overdrive                            | 一部対応                 | Edgeやサブタイプを実装。Output Level=0を既定値に置き換える問題あり             |
-| Amp Simulator                                    | 対応しているが誤りがある | AMP Type・LPF・Output Levelの配置とDSP処理が不一致                             |
+| Amp Simulator                                    | 一部対応 | パラメータ配置の誤りは修正・検証済み。通常／Stereo双方でAMP Type・LPF・Output Level・予約欄を確認。アンプ音響モデルの厳密な再現性は未検証 |
 | Phaser                                           | 対応しているが誤りがある | Stage／Diffusion実装後も同じパラメータをMid EQとして二重解釈                   |
 | Tremolo／Auto Pan                                | 一部対応                 | AM変調・位相差等あり。PM DepthやF/R Depth、PAN Direction等は未反映             |
 | Rotary Speaker・3-Band EQ                        | 一部対応                 | DSPと代表的な音声テストあり。全パラメータの定量検証は未完了                    |
@@ -105,11 +105,23 @@ TOTAL: 421 | PASSED: 421 | FAILED: 0
 
 本項の不具合は解消済み。ただし、この検証はVolume／Pan保持の修正を対象とし、CC121の全リセット対象・発音中の状態管理等の仕様準拠を保証するものではない。そのため機能別分類は「一部対応」とする。
 
-### 2. Amp Simulatorのパラメータ配置が異なる
+### 2. Amp Simulatorのパラメータ配置が異なる【修正・検証済み】
 
 `efctparamlist.pdf` p.30ではParameter 2がAMP Type、3がLPF、4がOutput Levelである。
 
-`Source/VariationEffect.cpp`の`updateDistortionParameters`はParameter 5を出力レベルとして読む。Amp SimulatorのLPFは4500 Hz固定であり、さらにParameter 2／3をLow EQとしても解釈する。
+修正前は`Source/VariationEffect.cpp`の`updateDistortionParameters`がParameter 5を出力レベルとして読み、Amp SimulatorのLPFを4500 Hz固定とし、Parameter 2／3をLow EQとしても解釈していた。
+
+2026-09-12に、Amp Simulator専用の`updateAmpSimulatorParameters`へ分離した修正を確認した。
+
+- Parameter 2をAMP Type（0: Off、1: Stack、2: Combo、3: Tube）として読み、キャビネットフィルターを切り替える。
+- Parameter 3をTable#3によるLPF周波数として読み、60（Thru）では当該LPFを無効化する。
+- Parameter 4をOutput Levelとして読み、0を既定値へ置き換えず、Wet出力を0にする。
+- Parameter 5〜9、12〜16をEQや出力レベルへ流用せず、Amp SimulatorのPost EQを無効化する。
+- 通常版（LSB 00H）とStereo版（LSB 08H）の双方を専用更新経路へ接続する。
+
+`Tests/XgRegressionTests.cpp`の`testAmpSimulatorParameterLayout`にある28アサーションがすべて成功した。両サブタイプで、SysEx格納位置、Output Levelの音量変化と0でのWet無音化、LPFの高域減衰、Low EQ誤解釈の解消、AMP Type各値とOffの音声差、予約Parameter 5〜9の音声不変性を確認した。Parameter 12〜16の非使用は静的確認による。
+
+本項のパラメータ配置の不具合は解消済み。Stack／Combo／Tubeは独自のフィルターモデルであり、テストは実機の音響特性との一致やLPF全値域の定量精度まで保証しない。そのため機能全体の分類は「一部対応」とする。
 
 ### 3. Symphonicのパラメータ配置がChorusと混同されている
 
