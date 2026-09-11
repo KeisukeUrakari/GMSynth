@@ -38,12 +38,12 @@
 結果:
 
 ```text
-TOTAL: 449 | PASSED: 449 | FAILED: 0
+TOTAL: 461 | PASSED: 461 | FAILED: 0
 ```
 
 この結果は既存アサーションの成功を示すものであり、全仕様項目の一致を示すものではない。以下の不一致には、現在のテストでは検出できないものが含まれる。
 
-2026-09-12のAmp Simulator修正後に再実行した結果。CC121関連19アサーションに加え、Amp Simulator関連28アサーションもすべて成功した。Amp Simulator修正前に失敗していた12件が解消し、CC121修正後の421件も引き続き成功している。
+2026-09-12のPart EQ修正後に再実行した結果。Part EQ関連12アサーションがすべて成功し、修正前に失敗していた4件が解消した。CC121関連19件、Amp Simulator関連28件を含む従来の449件も引き続き成功している。
 
 ## 機能別の対応状況
 
@@ -65,7 +65,7 @@ TOTAL: 449 | PASSED: 449 | FAILED: 0
 | Velocity Limit Low／High                         | 未対応                   | `08 nn 6DH／6EH`の処理なし                                                     |
 | Element Reserve                                  | 対応しているが誤りがある | ノート数と実ボイス数が混在し、指定した発音予約数を保証しない                   |
 | Same Note Assign                                 | 一部対応                 | Single／Multiの処理あり。INSTの音色別挙動は未検証                              |
-| Part EQ                                          | 対応しているが誤りがある | 仕様の±12 dB相当の範囲に対し、実装は最大−64～＋63 dB                           |
+| Part EQ                                          | 一部対応 | 過大なゲイン幅は修正・検証済み。通常パートのBass／Treble両端・中央値と復帰を音声確認。補助ドラム経路は静的確認のみ |
 | Drum Setup 1／2                                  | 一部対応                 | 音程・レベル・パン・Send・EG等を実装。音符別初期値表は反映していない           |
 | Drum Setup 3／4                                  | 未対応                   | 明示的に無視する実装                                                           |
 | エフェクト初期値・Type変更時ロード               | 一部対応                 | 実装対象の多数の種類を検査済み。ただしEffect Map全種類は未対応                 |
@@ -135,11 +135,23 @@ TOTAL: 449 | PASSED: 449 | FAILED: 0
 
 `Source/VariationEffect.cpp`の`updatePhaserParameters`では、これらをMid Frequency／Gainとしても使用する。「変更すると音が変わる」という現在のテストだけでは、誤った効果まで合格になる。
 
-### 5. Part EQの増減幅が過大
+### 5. Part EQの増減幅が過大【修正・検証済み】
 
 Parameter Change Tableでは`00H〜7FH`が−12～＋12 dB相当である。
 
-`Source/FluidSynthEngine.cpp`の`updatePartEqCoefficients`は`value - 64`をそのままdBとして使用し、最大−64～＋63 dBになる。
+修正前は`Source/FluidSynthEngine.cpp`の`updatePartEqCoefficients`が`value - 64`をそのままdBとして使用し、最大−64～＋63 dBになっていた。
+
+2026-09-12にソース差分と回帰テストを確認した。`Source/XgModel.h`に追加された`decodePartEqGain`は入力を0〜127へ制限し、64未満では`(value - 64) * 12 / 64`、64超では`(value - 64) * 12 / 63`を用いる。これにより0＝−12 dB、64＝0 dB、127＝＋12 dBとなり、ゲイン幅の不一致が解消した。中間値の区分線形補間は実装上の選択であり、仕様表が全中間値の厳密な式を規定していると判断したものではない。
+
+通常パートのBass／Trebleに加え、`setupAuxDrumSlotEq`内のPart EQとNote EQも同じ換算関数へ統一されている。
+
+`Tests/XgRegressionTests.cpp`の`testPartEqGainRange`にある12アサーションがすべて成功した。
+
+- SysEx経由でBass／Trebleの値を0、64、127、64へ変更し、左右とも−12、0、＋12、0 dB相当となることを許容差±0.5 dBで確認した。
+- Bassは50 Hz、Trebleは10 kHzの信号を使用し、過渡区間を除いたRMS比で測定した。
+- 増減後に64へ戻した際のゲイン復帰と、別パートへの非影響を確認した。
+
+本項のゲイン幅の不具合は解消済み。今回の音声試験は通常パート経路が対象であり、補助ドラム経路の変更は静的確認にとどまる。全中間値・全周波数設定の音声検証も未実施のため、機能全体の分類は「一部対応」とする。
 
 ### 6. SFXのバンク判定が異なる
 

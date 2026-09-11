@@ -1312,7 +1312,7 @@ void FluidSynthEngine::updatePartEqCoefficients (int channel) noexcept
     const auto& p = partParameters[index];
 
     // Bass
-    const auto bassGainDb = static_cast<float> (p.eqBass - 64);
+    const auto bassGainDb = xg::decodePartEqGain (p.eqBass);
     if (std::abs (bassGainDb) < 0.1f)
     {
         eq.bassActive = false;
@@ -1330,7 +1330,7 @@ void FluidSynthEngine::updatePartEqCoefficients (int channel) noexcept
     }
 
     // Treble
-    const auto trebleGainDb = static_cast<float> (p.eqTreble - 64);
+    const auto trebleGainDb = xg::decodePartEqGain (p.eqTreble);
     if (std::abs (trebleGainDb) < 0.1f)
     {
         eq.trebleActive = false;
@@ -3419,7 +3419,7 @@ void FluidSynthEngine::setupAuxDrumSlotEq (int slotIndex,
     const auto& part = partParameters[static_cast<size_t> (sourceChannel)];
 
     // 1. Note EQ (Bass and Treble shelves)
-    const auto noteBassDb = static_cast<float> (noteParams.eqBass - 64) * (12.0f / 64.0f);
+    const auto noteBassDb = xg::decodePartEqGain (noteParams.eqBass);
     if (std::abs (noteBassDb) >= 0.1f)
     {
         const auto gainFactor = juce::Decibels::decibelsToGain (noteBassDb);
@@ -3436,7 +3436,7 @@ void FluidSynthEngine::setupAuxDrumSlotEq (int slotIndex,
         slot.noteBassFilters[1].makeInactive();
     }
 
-    const auto noteTrebleDb = static_cast<float> (noteParams.eqTreble - 64) * (12.0f / 64.0f);
+    const auto noteTrebleDb = xg::decodePartEqGain (noteParams.eqTreble);
     if (std::abs (noteTrebleDb) >= 0.1f)
     {
         const auto gainFactor = juce::Decibels::decibelsToGain (noteTrebleDb);
@@ -3454,7 +3454,7 @@ void FluidSynthEngine::setupAuxDrumSlotEq (int slotIndex,
     }
 
     // 2. Part EQ (in series)
-    const auto partBassDb = static_cast<float> (part.eqBass - 64);
+    const auto partBassDb = xg::decodePartEqGain (part.eqBass);
     if (std::abs (partBassDb) >= 0.1f)
     {
         const auto gainFactor = juce::Decibels::decibelsToGain (partBassDb);
@@ -3471,7 +3471,7 @@ void FluidSynthEngine::setupAuxDrumSlotEq (int slotIndex,
         slot.partBassFilters[1].makeInactive();
     }
 
-    const auto partTrebleDb = static_cast<float> (part.eqTreble - 64);
+    const auto partTrebleDb = xg::decodePartEqGain (part.eqTreble);
     if (std::abs (partTrebleDb) >= 0.1f)
     {
         const auto gainFactor = juce::Decibels::decibelsToGain (partTrebleDb);

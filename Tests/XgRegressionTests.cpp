@@ -2510,6 +2510,81 @@ void testCc121_PreservesVolumeAndPan()
     }
 }
 
+// xgparameterchangetable.pdf, Multi Part EQ BASS/TREBLE:
+// data 0..127 spans approximately -12..+12 dB, with 64 neutral.
+// Only specified endpoints/centre are asserted; no intermediate interpolation
+// formula is imposed. Measure well inside each shelf with 0.5 dB tolerance.
+void testPartEqGainRange()
+{
+    std::cout << "\n=== Part EQ: gain range ===" << std::endl;
+    constexpr int samples = 16384;
+    struct Band { uint8_t address; float frequency; const char* name; };
+    const std::array<Band, 2> bands {{{0x72, 50.0f, "Bass"}, {0x73, 10000.0f, "Treble"}}};
+    for (const auto& band : bands)
+    {
+        FluidSynthEngine engine;
+        engine.prepare (44100.0, 512);
+        const uint8_t xgOn[] = {0xF0,0x43,0x10,0x4C,0,0,0x7E,0,0xF7};
+        engine.handleSysExForTest (xgOn, sizeof (xgOn));
+        auto write = [&] (uint8_t address, uint8_t value)
+        {
+            const uint8_t message[] = {0xF0,0x43,0x10,0x4C,0x08,0,address,value,0xF7};
+            engine.handleSysExForTest (message, sizeof (message));
+        };
+        write (0x11, 127); // Dry only: no reverb/chorus/variation contributions.
+        write (0x12, 0);
+        write (0x13, 0);
+        write (0x14, 0);
+        write (0x76, 40); // Bass shelf 2 kHz
+        write (0x77, 28); // Treble shelf 500 Hz
+        juce::AudioBuffer<float> input (2, samples), output (2, samples);
+        for (int i = 0; i < samples; ++i)
+        {
+            // Low input amplitude also avoids clipping in the faulty +63 dB case.
+            const float s = 0.0001f * std::sin (2.0f * juce::MathConstants<float>::pi
+                * band.frequency * static_cast<float> (i) / 44100.0f);
+            input.setSample (0, i, s);
+            input.setSample (1, i, s * 0.7f);
+        }
+        auto measure = [&] (int part)
+        {
+            engine.renderBlockWithInjectedPartForTest (output, part, input);
+            return std::array<float, 2> {{
+                output.getRMSLevel (0, samples / 2, samples / 2),
+                output.getRMSLevel (1, samples / 2, samples / 2)}};
+        };
+        const auto flat = measure (0);
+        const auto otherFlat = measure (1);
+        logTestResult (std::string ("Part EQ ") + band.name + " dry reference is audible",
+                       flat[0] > 1.0e-8f && flat[1] > 1.0e-8f
+                       && otherFlat[0] > 1.0e-8f && otherFlat[1] > 1.0e-8f);
+        struct Gain { uint8_t data; float db; };
+        const std::array<Gain, 4> gains {{{0, -12.0f}, {64, 0.0f}, {127, 12.0f}, {64, 0.0f}}};
+        for (const auto& gain : gains)
+        {
+            write (band.address, gain.data);
+            const auto actual = measure (0);
+            bool correct = true;
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                const float db = 20.0f * std::log10 (actual[ch] / flat[ch]);
+                correct = correct && std::isfinite (db) && std::abs (db - gain.db) < 0.5f;
+                if (! std::isfinite (db) || std::abs (db - gain.db) >= 0.5f)
+                    std::cout << "  " << band.name << " data=" << static_cast<int> (gain.data)
+                              << " channel=" << ch << " measured=" << db
+                              << " dB expected=" << gain.db << " +/-0.5 dB\n";
+            }
+            logTestResult (std::string ("Part EQ ") + band.name + " data="
+                               + std::to_string (gain.data) + " has specification gain on L/R", correct);
+        }
+        write (band.address, 127);
+        const auto other = measure (1);
+        logTestResult (std::string ("Part EQ ") + band.name + " does not affect another part",
+                       std::abs (other[0] / otherFlat[0] - 1.0f) < 0.001f
+                       && std::abs (other[1] / otherFlat[1] - 1.0f) < 0.001f);
+    }
+}
+
 int main()
 {
     std::cout << "=======================================================" << std::endl;
@@ -2522,6 +2597,7 @@ int main()
     testE04_ZeroValueHandling();
     testCc121_PreservesVolumeAndPan();
     testAmpSimulatorParameterLayout();
+    testPartEqGainRange();
     testE05_EffectSendConversion();
     testE09_MultiEqPresets();
     testE10_MultiPartResetValues();

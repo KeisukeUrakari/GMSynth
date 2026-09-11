@@ -361,6 +361,16 @@ namespace xg
         return eqFrequencyTable[static_cast<size_t> (index)];
     }
 
+    inline float decodePartEqGain (int data) noexcept
+    {
+        const int val = std::clamp (data, 0, 127);
+        if (val < 64)
+            return static_cast<float> (val - 64) * (12.0f / 64.0f);
+        if (val > 64)
+            return static_cast<float> (val - 64) * (12.0f / 63.0f);
+        return 0.0f;
+    }
+
     struct ReverbParameters
     {
         uint8_t typeMsb = 0x01; // 01H = Hall 1
