@@ -1,6 +1,23 @@
 #include "FluidSynthEngine.h"
 
 #include <algorithm>
+#include <cmath>
+
+namespace
+{
+    // XG Inter-effect Send level conversion (0..127 -> -inf dB..0 dB..+6 dB)
+    // 0: 0.0f (mute), 64: 1.0f (0 dB), 127: ~1.99526f (+6 dB)
+    inline float convertEffectSendLevel (uint8_t sendVal) noexcept
+    {
+        if (sendVal == 0)
+            return 0.0f;
+        if (sendVal <= 64)
+            return static_cast<float> (sendVal) / 64.0f;
+
+        constexpr float gainMax = 1.9952623149688795f; // 10^(6/20)
+        return 1.0f + (static_cast<float> (sendVal - 64) / 63.0f) * (gainMax - 1.0f);
+    }
+}
 
 //==============================================================================
 class FluidSynthEngine::ReclaimerThread final : public juce::Thread
@@ -60,7 +77,7 @@ FluidSynthEngine::FluidSynthEngine()
         channelBankMsb[index].store (msb, std::memory_order_relaxed);
         channelBankLsb[index].store (lsb, std::memory_order_relaxed);
         channelBank[index].store ((msb << 7) | lsb, std::memory_order_relaxed);
-        channelPartMode[index].store (static_cast<uint8_t> (isDrum ? xg::PartMode::Drum : xg::PartMode::Normal), std::memory_order_relaxed);
+        channelPartMode[index].store (static_cast<uint8_t> (isDrum ? xg::PartMode::Drums1 : xg::PartMode::Normal), std::memory_order_relaxed);
         channelGsPartMode[index].store (static_cast<uint8_t> (isDrum ? gs::PartMode::Drum1 : gs::PartMode::Normal), std::memory_order_relaxed);
         drumPartProtectMode[index].store (isDrum, std::memory_order_relaxed);
         channelProgram[index].store (0, std::memory_order_relaxed);
@@ -70,8 +87,8 @@ FluidSynthEngine::FluidSynthEngine()
     systemParameters.reset();
     for (auto& nrpn : nrpnStates)
         nrpn.reset();
-    for (auto& part : partParameters)
-        part.reset();
+    for (int channel = 0; channel < numMidiChannels; ++channel)
+        partParameters[static_cast<size_t> (channel)].reset (channel);
     drumSetup1.reset();
     drumSetup2.reset();
 
@@ -96,6 +113,8 @@ FluidSynthEngine::FluidSynthEngine()
     variationParameters.reset();
     variationProcessor.reset();
     variationProcessor.updateParameters (variationParameters);
+    updateReverbSettings();
+    updateChorusSettings();
     multiEqParameters.reset();
     multiEqFiltersNeedUpdate = true;
     for (auto& chan : multiEqFilters)
@@ -1040,11 +1059,7 @@ void FluidSynthEngine::updateChorusSettings() noexcept
     }
 
     // Param 2: LFO Depth (0..127)
-    float depthNorm = baseDepth;
-    if (chorusParameters.parameters[1] > 0)
-    {
-        depthNorm = juce::jlimit (0.0f, 1.0f, static_cast<float> (chorusParameters.parameters[1]) / 127.0f);
-    }
+    const auto depthNorm = juce::jlimit (0.0f, 1.0f, static_cast<float> (chorusParameters.parameters[1]) / 127.0f);
 
     // Param 3: Feedback (1..127 -> -63..+63, 64 = 0)
     float feedback = baseFeedback;
@@ -1063,6 +1078,7 @@ void FluidSynthEngine::updateChorusSettings() noexcept
 
     chorusProcessor.setRate (rateHz);
     chorusProcessor.setDepth (depthNorm);
+    appliedChorusDepth = depthNorm;
     chorusProcessor.setCentreDelay (delayMs);
     chorusProcessor.setFeedback (feedback);
     chorusProcessor.setMix (1.0f);
@@ -1204,13 +1220,13 @@ void FluidSynthEngine::resetChannelState (int channel) noexcept
     channelBankMsb[index].store (msb, std::memory_order_release);
     channelBankLsb[index].store (lsb, std::memory_order_release);
     channelBank[index].store ((msb << 7) | lsb, std::memory_order_release);
-    channelPartMode[index].store (static_cast<uint8_t> (isDrum ? xg::PartMode::Drum : xg::PartMode::Normal), std::memory_order_release);
+    channelPartMode[index].store (static_cast<uint8_t> (isDrum ? xg::PartMode::Drums1 : xg::PartMode::Normal), std::memory_order_release);
     channelGsPartMode[index].store (static_cast<uint8_t> (isDrum ? gs::PartMode::Drum1 : gs::PartMode::Normal), std::memory_order_release);
     drumPartProtectMode[index].store (isDrum, std::memory_order_release);
     channelProgram[index].store (0, std::memory_order_release);
     channelModulation[index].store (0, std::memory_order_release);
 
-    partParameters[index].reset();
+    partParameters[index].reset (channel);
     gsPartParameters[index].reset (channel);
     partEqs[index].reset();
     updatePartEqCoefficients (channel);
@@ -1814,6 +1830,11 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
 
                 case 0x07: // Part Mode
                 {
+                    // GMSynth supports Drum Setups 1 and 2 (Part Modes 0..3).
+                    // Unimplemented modes (04: Drums3, 05: Drums4) are ignored per product policy.
+                    if (val == 4 || val == 5 || val > 5)
+                        break;
+
                     const auto mode = static_cast<xg::PartMode> (val);
                     channelPartMode[chIdx].store (static_cast<uint8_t> (mode), std::memory_order_release);
                     if (mode == xg::PartMode::Normal)
@@ -2242,11 +2263,13 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
             if (curAddr == 0x00)
             {
                 reverbParameters.typeMsb = val;
+                reverbParameters.parameters = xg::defaults::getReverbDefaults (reverbParameters.typeMsb, reverbParameters.typeLsb);
                 reverbChanged = true;
             }
             else if (curAddr == 0x01)
             {
                 reverbParameters.typeLsb = val;
+                reverbParameters.parameters = xg::defaults::getReverbDefaults (reverbParameters.typeMsb, reverbParameters.typeLsb);
                 reverbChanged = true;
             }
             else if (curAddr >= 0x02 && curAddr <= 0x0b)
@@ -2273,11 +2296,13 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
             else if (curAddr == 0x20)
             {
                 chorusParameters.typeMsb = val;
+                chorusParameters.parameters = xg::defaults::getChorusDefaults (chorusParameters.typeMsb, chorusParameters.typeLsb);
                 chorusChanged = true;
             }
             else if (curAddr == 0x21)
             {
                 chorusParameters.typeLsb = val;
+                chorusParameters.parameters = xg::defaults::getChorusDefaults (chorusParameters.typeMsb, chorusParameters.typeLsb);
                 chorusChanged = true;
             }
             else if (curAddr >= 0x22 && curAddr <= 0x2b)
@@ -2308,11 +2333,17 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
             else if (curAddr == 0x40)
             {
                 variationParameters.typeMsb = val;
+                const auto defs = xg::defaults::getVariationDefaults (variationParameters.typeMsb, variationParameters.typeLsb);
+                variationParameters.parameters14Bit = defs.params14Bit;
+                variationParameters.parameters11To16 = defs.params11To16;
                 variationChanged = true;
             }
             else if (curAddr == 0x41)
             {
                 variationParameters.typeLsb = val;
+                const auto defs = xg::defaults::getVariationDefaults (variationParameters.typeMsb, variationParameters.typeLsb);
+                variationParameters.parameters14Bit = defs.params14Bit;
+                variationParameters.parameters11To16 = defs.params11To16;
                 variationChanged = true;
             }
             else if (curAddr >= 0x42 && curAddr <= 0x55)
@@ -2969,7 +3000,7 @@ void FluidSynthEngine::handleNrpnDataEntry (int channel, int value, bool isMsb) 
             }
             else
             {
-                auto& setup = (partMode == xg::PartMode::Drums2 || partMode == xg::PartMode::Drums4)
+                auto& setup = (partMode == xg::PartMode::Drums2)
                                   ? drumSetup2 : drumSetup1;
                 auto& note = setup.notes[nrpnLsb];
                 note.modified = true;
@@ -3059,7 +3090,7 @@ void FluidSynthEngine::handleNrpnDataIncDec (int channel, int delta) noexcept
             }
             else
             {
-                auto& setup = (partMode == xg::PartMode::Drums2 || partMode == xg::PartMode::Drums4)
+                auto& setup = (partMode == xg::PartMode::Drums2)
                                   ? drumSetup2 : drumSetup1;
                 auto& note = setup.notes[nrpnLsb];
                 note.modified = true;
@@ -3556,7 +3587,7 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
                 }
                 else
                 {
-                    const auto setupIdx = (partMode == xg::PartMode::Drums2 || partMode == xg::PartMode::Drums4) ? 2 : 1;
+                    const auto setupIdx = (partMode == xg::PartMode::Drums2) ? 2 : 1;
                     const auto& setup = (setupIdx == 2) ? drumSetup2 : drumSetup1;
                     const auto& noteParams = setup.notes[static_cast<size_t> (noteNumber)];
 
@@ -3755,7 +3786,7 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
                 }
                 else
                 {
-                    const auto& setup = (partMode == xg::PartMode::Drums2 || partMode == xg::PartMode::Drums4)
+                    const auto& setup = (partMode == xg::PartMode::Drums2)
                                             ? drumSetup2 : drumSetup1;
                     if (juce::isPositiveAndBelow (noteNumber, 128))
                     {
@@ -4484,7 +4515,7 @@ void FluidSynthEngine::renderSubRange (int totalSamples, float* destLeft, float*
 
         if (isXg && variationParameters.connection == 1)
         {
-            const auto varToChorus = static_cast<float> (variationParameters.sendToChorus) / 127.0f;
+            const auto varToChorus = convertEffectSendLevel (variationParameters.sendToChorus);
             if (varToChorus > 0.0f)
             {
                 chorusBusBuffer.addFrom (0, 0, variationOutputBuffer, 0, 0, chunkSize, varToChorus);
@@ -4526,7 +4557,7 @@ void FluidSynthEngine::renderSubRange (int totalSamples, float* destLeft, float*
             }
         }
 
-        const auto chorusToReverb = isXg ? (static_cast<float> (chorusParameters.sendToReverb) / 127.0f) : 0.0f;
+        const auto chorusToReverb = isXg ? convertEffectSendLevel (chorusParameters.sendToReverb) : 0.0f;
         if (chorusToReverb > 0.0f)
         {
             reverbBusBuffer.addFrom (0, 0, chorusBusBuffer, 0, 0, chunkSize, chorusToReverb);
@@ -4534,7 +4565,7 @@ void FluidSynthEngine::renderSubRange (int totalSamples, float* destLeft, float*
         }
         if (isXg && variationParameters.connection == 1)
         {
-            const auto varToReverb = static_cast<float> (variationParameters.sendToReverb) / 127.0f;
+            const auto varToReverb = convertEffectSendLevel (variationParameters.sendToReverb);
             if (varToReverb > 0.0f)
             {
                 reverbBusBuffer.addFrom (0, 0, variationOutputBuffer, 0, 0, chunkSize, varToReverb);
@@ -4755,4 +4786,9 @@ void FluidSynthEngine::destroyChange (SynthChange* change) noexcept
 
     delete change->synth;
     delete change;
+}
+
+float FluidSynthEngine::testConvertEffectSendLevel (uint8_t sendVal) noexcept
+{
+    return convertEffectSendLevel (sendVal);
 }

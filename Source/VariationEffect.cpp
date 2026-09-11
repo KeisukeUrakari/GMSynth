@@ -115,8 +115,8 @@ void VariationEffectProcessor::updateDryWet (uint8_t dwVal, float defaultWetRati
 
 void VariationEffectProcessor::updateDelayParameters (const xg::VariationParameters& params)
 {
-    isCrossDelay = (currentTypeMsb == 0x08);
-    isDelayLCR   = (currentTypeMsb == 0x05);
+    isCrossDelay = (currentTypeMsb == xg::varTypeCrossDelay);
+    isDelayLCR   = (currentTypeMsb == xg::varTypeDelayLCR);
 
     // Param 1: Delay Time L (14-bit in 0.1ms units)
     float timeLMs = 250.0f;
@@ -153,9 +153,9 @@ void VariationEffectProcessor::updateDelayParameters (const xg::VariationParamet
 
 void VariationEffectProcessor::updateDistortionParameters (const xg::VariationParameters& params)
 {
-    if (currentTypeMsb == 0x48)
+    if (currentTypeMsb == xg::varTypeOverdrive)
         distType = DistortionType::Overdrive;
-    else if (currentTypeMsb == 0x49)
+    else if (currentTypeMsb == xg::varTypeAmpSimulator)
         distType = DistortionType::AmpSim;
     else
         distType = DistortionType::Distortion;
@@ -253,14 +253,14 @@ void VariationEffectProcessor::updatePhaserParameters (const xg::VariationParame
 
 void VariationEffectProcessor::updateTremoloAutoPanParameters (const xg::VariationParameters& params)
 {
-    isAutoPan = (currentTypeMsb == 0x45);
+    isAutoPan = (currentTypeMsb == xg::varTypeAutoPan);
 
     // Param 1: LFO Freq (0..127 -> 0.1..25.0 Hz)
     const auto rateVal = static_cast<float> (params.parameters14Bit[0] & 0x7F);
     modRateHz = 0.1f + (rateVal / 127.0f) * 20.0f;
 
     // Param 2: LFO Depth (0..1.0)
-    const auto depthVal = params.parameters14Bit[1] > 0 ? static_cast<float> (params.parameters14Bit[1] & 0x7F) : 80.0f;
+    const auto depthVal = static_cast<float> (params.parameters14Bit[1] & 0x7F);
     modDepth = juce::jlimit (0.0f, 1.0f, depthVal / 127.0f);
 
     // Param 10: Dry / Wet (default 100% wet for tremolo/pan)

@@ -97,6 +97,31 @@ public:
     const gs::ChorusParameters& getGsChorusParameters() const noexcept { return gsChorusParameters; }
     const gs::DelayParameters& getGsDelayParameters() const noexcept { return gsDelayParameters; }
 
+    // Test accessors for regression suite
+    const xg::ReverbParameters& getReverbParametersForTest() const noexcept { return reverbParameters; }
+    const xg::ChorusParameters& getChorusParametersForTest() const noexcept { return chorusParameters; }
+    const xg::VariationParameters& getVariationParametersForTest() const noexcept { return variationParameters; }
+    const xg::PartParameters& getPartParametersForTest (int channel) const noexcept { return getPartParameters (channel); }
+    uint8_t getChannelPartModeForTest (int channel) const noexcept
+    {
+        if (! juce::isPositiveAndBelow (channel, static_cast<int> (numMidiChannels))) return 0;
+        return channelPartMode[static_cast<size_t> (channel)].load (std::memory_order_acquire);
+    }
+    float getChorusProcessorDepthForTest() const noexcept { return appliedChorusDepth; }
+    static float testConvertEffectSendLevel (uint8_t sendVal) noexcept;
+    void handleSysExForTest (const juce::uint8* data, int numBytes) noexcept
+    {
+        if (data != nullptr && numBytes >= 2 && data[0] == 0xF0)
+        {
+            const auto endOffset = (data[numBytes - 1] == 0xF7) ? 2 : 1;
+            handleSysEx (data + 1, numBytes - endOffset);
+        }
+        else
+        {
+            handleSysEx (data, numBytes);
+        }
+    }
+
 private:
     struct PresetLocation
     {
@@ -342,6 +367,7 @@ private:
 
     juce::dsp::Reverb reverbProcessor;
     juce::dsp::Chorus<float> chorusProcessor;
+    float appliedChorusDepth = 0.0f;
     VariationEffectProcessor variationProcessor;
 
     std::array<AuxDrumSlot, numAuxDrumChannels> auxDrumSlots;

@@ -3,6 +3,7 @@
 
 # Keep the exporter projects under Builds/MacOSX in git, but ignore products.
 /Builds/**/build/
+/Builds/bin/
 /Builds/**/*_artefacts/
 /Builds/**/*.app/
 /Builds/**/*.appex/

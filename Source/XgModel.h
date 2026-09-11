@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include "XgEffectDefaults.h"
 
 namespace xg
 {
@@ -181,7 +182,7 @@ namespace xg
 
         ControllerMatrix ctrlMatrix;
 
-        void reset() noexcept
+        void reset (int channelIndex = 0) noexcept
         {
             filterCutoff = defaultFilterCutoff;
             filterResonance = defaultFilterResonance;
@@ -206,7 +207,7 @@ namespace xg
             detuneCents = 0.0f;
             monoPolyMode = 1;
             sameNoteAssign = 1;
-            rcvChannel = 0;
+            rcvChannel = static_cast<uint8_t> (channelIndex & 0x7F);
             noteLimitLow = 0;
             noteLimitHigh = 127;
             dryLevel = 127;
@@ -214,7 +215,7 @@ namespace xg
             velocitySenseOffset = 64;
             portamentoSwitch = 0;
             portamentoTime = 0;
-            elementReserve = 2;
+            elementReserve = (channelIndex == 9) ? 0 : 2;
 
             ctrlMatrix.reset();
         }
@@ -363,10 +364,7 @@ namespace xg
         {
             typeMsb = 0x01;
             typeLsb = 0x00;
-            parameters.fill (0);
-            parameters[0] = 64; // Reverb Time default
-            parameters[1] = 64; // Diffusion default
-            parameters[4] = 64; // LPF default
+            parameters = defaults::getReverbDefaults (typeMsb, typeLsb);
             reverbReturn = 64;
             reverbPan = 64;
         }
@@ -385,9 +383,7 @@ namespace xg
         {
             typeMsb = 0x41;
             typeLsb = 0x00;
-            parameters.fill (0);
-            parameters[0] = 64; // LFO Freq default
-            parameters[1] = 64; // LFO Depth default
+            parameters = defaults::getChorusDefaults (typeMsb, typeLsb);
             chorusReturn = 64;
             chorusPan = 64;
             sendToReverb = 0;
@@ -399,16 +395,16 @@ namespace xg
     constexpr uint8_t varTypeDelayLR      = 0x06;
     constexpr uint8_t varTypeEcho         = 0x07;
     constexpr uint8_t varTypeCrossDelay   = 0x08;
-    constexpr uint8_t varTypeChorus       = 0x40;
-    constexpr uint8_t varTypeFlanger      = 0x41;
-    constexpr uint8_t varTypeSymphonic    = 0x42;
-    constexpr uint8_t varTypeAutoWah      = 0x43;
-    constexpr uint8_t varTypeTremolo      = 0x44;
-    constexpr uint8_t varTypeAutoPan      = 0x45;
-    constexpr uint8_t varTypePhaser       = 0x46;
-    constexpr uint8_t varTypeDistortion   = 0x47;
-    constexpr uint8_t varTypeOverdrive    = 0x48;
-    constexpr uint8_t varTypeAmpSimulator = 0x49;
+    constexpr uint8_t varTypeChorus       = 0x41;
+    constexpr uint8_t varTypeFlanger      = 0x43;
+    constexpr uint8_t varTypeSymphonic    = 0x44;
+    constexpr uint8_t varTypeTremolo      = 0x46;
+    constexpr uint8_t varTypeAutoPan      = 0x47;
+    constexpr uint8_t varTypePhaser       = 0x48;
+    constexpr uint8_t varTypeDistortion   = 0x49;
+    constexpr uint8_t varTypeOverdrive    = 0x4A;
+    constexpr uint8_t varTypeAmpSimulator = 0x4B;
+    constexpr uint8_t varTypeAutoWah      = 0x4E;
 
     struct VariationParameters
     {
@@ -432,7 +428,9 @@ namespace xg
         {
             typeMsb = 0x05;
             typeLsb = 0x00;
-            parameters14Bit.fill (0);
+            const auto defs = defaults::getVariationDefaults (typeMsb, typeLsb);
+            parameters14Bit = defs.params14Bit;
+            parameters11To16 = defs.params11To16;
             varReturn = 64;
             varPan = 64;
             sendToReverb = 0;
@@ -444,7 +442,6 @@ namespace xg
             catControlDepth = 64;
             ac1ControlDepth = 64;
             ac2ControlDepth = 64;
-            parameters11To16.fill (0);
         }
     };
 
@@ -494,19 +491,39 @@ namespace xg
             switch (type)
             {
                 case 0: // Flat
-                    gain1 = 64; gain2 = 64; gain3 = 64; gain4 = 64; gain5 = 64;
+                    gain1 = 64; freq1 = 12; q1 = 7; shape1 = 0;
+                    gain2 = 64; freq2 = 28; q2 = 7;
+                    gain3 = 64; freq3 = 34; q3 = 7;
+                    gain4 = 64; freq4 = 46; q4 = 7;
+                    gain5 = 64; freq5 = 52; q5 = 7; shape5 = 0;
                     break;
                 case 1: // Jazz
-                    gain1 = 64 + 4; gain2 = 64; gain3 = 64 - 2; gain4 = 64 + 2; gain5 = 64 + 3;
+                    gain1 = 58; freq1 = 8;  q1 = 7; shape1 = 0;
+                    gain2 = 66; freq2 = 16; q2 = 3;
+                    gain3 = 68; freq3 = 33; q3 = 3;
+                    gain4 = 60; freq4 = 44; q4 = 5;
+                    gain5 = 58; freq5 = 50; q5 = 7; shape5 = 0;
                     break;
                 case 2: // Pops
-                    gain1 = 64 + 3; gain2 = 64 + 1; gain3 = 64; gain4 = 64 + 2; gain5 = 64 + 4;
+                    gain1 = 68; freq1 = 16; q1 = 7; shape1 = 0;
+                    gain2 = 60; freq2 = 24; q2 = 20;
+                    gain3 = 67; freq3 = 34; q3 = 7;
+                    gain4 = 60; freq4 = 40; q4 = 20;
+                    gain5 = 70; freq5 = 48; q5 = 7; shape5 = 0;
                     break;
                 case 3: // Rock
-                    gain1 = 64 + 6; gain2 = 64 + 2; gain3 = 64 - 2; gain4 = 64 + 3; gain5 = 64 + 6;
+                    gain1 = 71; freq1 = 16; q1 = 7; shape1 = 0;
+                    gain2 = 68; freq2 = 20; q2 = 7;
+                    gain3 = 60; freq3 = 36; q3 = 5;
+                    gain4 = 68; freq4 = 41; q4 = 10;
+                    gain5 = 66; freq5 = 50; q5 = 7; shape5 = 0;
                     break;
                 case 4: // Concert
-                    gain1 = 64 + 4; gain2 = 64 - 2; gain3 = 64 - 2; gain4 = 64 + 2; gain5 = 64 + 5;
+                    gain1 = 67; freq1 = 12; q1 = 7; shape1 = 0;
+                    gain2 = 68; freq2 = 24; q2 = 7;
+                    gain3 = 64; freq3 = 34; q3 = 5;
+                    gain4 = 66; freq4 = 50; q4 = 7;
+                    gain5 = 61; freq5 = 52; q5 = 7; shape5 = 0;
                     break;
                 default:
                     break;

@@ -19,8 +19,14 @@ public:
                   juce::AudioBuffer<float>& outBuffer,
                   int numSamples) noexcept;
 
+    enum class DistortionType { Overdrive, Distortion, AmpSim };
+
     uint8_t getCurrentTypeMsb() const noexcept { return currentTypeMsb; }
     uint8_t getCurrentTypeLsb() const noexcept { return currentTypeLsb; }
+
+    DistortionType getDistortionTypeForTest() const noexcept { return distType; }
+    bool getIsAutoPanForTest() const noexcept { return isAutoPan; }
+    float getModDepthForTest() const noexcept { return modDepth; }
 
 private:
     double sampleRate = 44100.0;
@@ -50,7 +56,6 @@ private:
     // --- Distortion / Overdrive / Amp Sim DSP ---
     float distortionDrive = 1.0f;
     float distortionOutputGain = 1.0f;
-    enum class DistortionType { Overdrive, Distortion, AmpSim };
     DistortionType distType = DistortionType::Overdrive;
 
     std::array<juce::IIRFilter, 2> distPreFilters;
