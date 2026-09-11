@@ -177,6 +177,104 @@ void testE03_EffectDefaultTables()
                    && delayLCR.params14Bit[2] == 5000 && delayLCR.params14Bit[3] == 5000
                    && delayLCR.params14Bit[4] == 74);
 
+    // Complete, independent copies of the defaults published in
+    // efctparamdeflt.pdf p.39-40.  Do not derive these expectations from the
+    // production default table: these checks are intended to catch a wrong
+    // entry in that table, including Parameters 11..16.
+    struct Effect8DefaultCase
+    {
+        uint8_t msb, lsb;
+        const char* name;
+        xg::EffectDefaultParams8 expected;
+    };
+
+    const std::array<Effect8DefaultCase, 18> reverbDefaultCases {{
+        { 0x01, 0x00, "Hall 1",  {{ 18,10, 8,13,49,0,0,0,0,40, 0,4,50,8,64,0 }} },
+        { 0x01, 0x01, "Hall 2",  {{ 25,10,28, 6,46,0,0,0,0,40,13,3,74,7,64,0 }} },
+        { 0x01, 0x06, "Hall M",  {{ 18,10, 8,13,49,0,0,0,0,40, 0,4,50,8,64,0 }} },
+        { 0x01, 0x07, "Hall L",  {{ 18,10,28, 6,46,0,0,0,0,40,13,3,74,7,64,0 }} },
+        { 0x02, 0x00, "Room 1",  {{  5,10,16, 4,49,0,0,0,0,40, 5,3,64,8,64,0 }} },
+        { 0x02, 0x01, "Room 2",  {{ 12,10, 5, 4,38,0,0,0,0,40, 0,4,50,8,64,0 }} },
+        { 0x02, 0x02, "Room 3",  {{  9,10,47, 5,36,0,0,0,0,40, 0,4,60,8,64,0 }} },
+        { 0x02, 0x05, "Room S",  {{ 11,10, 5, 4,38,0,0,0,0,40, 0,4,50,8,64,0 }} },
+        { 0x02, 0x06, "Room M",  {{ 13,10,16, 4,49,0,0,0,0,40, 5,3,64,8,64,0 }} },
+        { 0x02, 0x07, "Room L",  {{ 15,10,47, 5,36,0,0,0,0,40, 0,4,60,8,64,0 }} },
+        { 0x03, 0x00, "Stage 1", {{ 19,10,16, 7,54,0,0,0,0,40, 0,3,64,6,64,0 }} },
+        { 0x03, 0x01, "Stage 2", {{ 11,10,16, 7,51,0,0,0,0,40, 2,2,64,6,64,0 }} },
+        { 0x04, 0x00, "Plate",   {{ 25,10, 6, 8,49,0,0,0,0,40, 2,3,64,5,64,0 }} },
+        { 0x04, 0x07, "GM Plate",{{ 13,10, 6, 8,49,0,0,0,0,40, 2,3,64,5,64,0 }} },
+        { 0x10, 0x00, "White Room",{{ 9,5,11,0,46,30,50,70,7,40,34,4,64,7,64,0 }} },
+        { 0x11, 0x00, "Tunnel",  {{ 48,6,19,0,44,33,52,70,16,40,20,4,64,7,64,0 }} },
+        { 0x12, 0x00, "Canyon",  {{ 59,6,63,0,45,34,62,91,13,40,25,4,64,4,64,0 }} },
+        { 0x13, 0x00, "Basement",{{  3,6, 3,0,34,26,29,59,15,40,32,4,64,8,64,0 }} }
+    }};
+    for (const auto& c : reverbDefaultCases)
+        logTestResult (std::string ("Complete Reverb defaults: ") + c.name,
+                       xg::defaults::getReverbDefaults (c.msb, c.lsb) == c.expected);
+
+    const std::array<Effect8DefaultCase, 17> chorusDefaultCases {{
+        { 0x41,0x00,"Chorus 1",{{ 6,54,77,106,0,28,64,46,64,64,46,64,10,0,0,0 }} },
+        { 0x41,0x01,"Chorus 2",{{ 8,63,64, 30,0,28,62,42,58,64,46,64,10,0,0,0 }} },
+        { 0x41,0x02,"Chorus 3",{{ 4,44,64,110,0,28,64,46,66,64,46,64,10,0,0,0 }} },
+        { 0x41,0x03,"GM Chorus 1",{{ 9,10,64,109,0,28,64,46,64,64,46,64,10,0,0,0 }} },
+        { 0x41,0x04,"GM Chorus 2",{{ 26,34,67,105,0,28,64,46,64,64,46,64,10,0,0,0 }} },
+        { 0x41,0x05,"GM Chorus 3",{{ 9,34,69,105,0,28,64,46,66,64,46,64,10,0,0,0 }} },
+        { 0x41,0x06,"GM Chorus 4",{{ 26,29,75,102,0,28,64,46,64,64,46,64,10,0,0,0 }} },
+        { 0x41,0x07,"FB Chorus",{{ 6,43,107,111,0,28,64,46,64,64,46,64,10,0,0,0 }} },
+        { 0x41,0x08,"Chorus 4",{{ 9,32,69,104,0,28,64,46,64,64,46,64,10,0,1,0 }} },
+        { 0x42,0x00,"Celeste 1",{{ 12,32,64,0,0,28,64,46,64,127,40,68,10,0,0,0 }} },
+        { 0x42,0x01,"Celeste 2",{{ 28,18,90,2,0,28,62,42,60,84,40,68,10,0,0,0 }} },
+        { 0x42,0x02,"Celeste 3",{{ 4,63,44,2,0,28,64,46,68,127,40,68,10,0,0,0 }} },
+        { 0x42,0x08,"Celeste 4",{{ 8,29,64,0,0,28,64,51,66,127,40,68,10,0,1,0 }} },
+        { 0x43,0x00,"Flanger 1",{{ 14,14,104,2,0,28,64,46,64,96,40,64,10,4,0,0 }} },
+        { 0x43,0x01,"Flanger 2",{{ 32,17,26,2,0,28,64,46,60,96,40,64,10,4,0,0 }} },
+        { 0x43,0x07,"GM Flanger",{{ 3,21,120,1,0,28,64,46,64,96,40,64,10,4,0,0 }} },
+        { 0x43,0x08,"Flanger 3",{{ 4,109,109,2,0,28,64,46,64,127,40,64,10,4,0,0 }} }
+    }};
+    for (const auto& c : chorusDefaultCases)
+        logTestResult (std::string ("Complete Chorus defaults: ") + c.name,
+                       xg::defaults::getChorusDefaults (c.msb, c.lsb) == c.expected);
+    const Effect8DefaultCase symphonicDefault { 0x44,0x00,"Symphonic",
+        {{ 12,25,16,0,0,28,64,46,64,127,46,64,10,0,0,0 }} };
+    logTestResult ("Complete Chorus defaults: Symphonic",
+                   xg::defaults::getChorusDefaults (0x44, 0x00) == symphonicDefault.expected);
+
+    struct VariationDefaultCase
+    {
+        uint8_t msb, lsb;
+        const char* name;
+        std::array<uint16_t, 10> p1To10;
+        std::array<uint8_t, 6> p11To16;
+    };
+    const std::array<VariationDefaultCase, 20> variationDefaultCases {{
+        {0x05,0x00,"Delay LCR",{{3333,1667,5000,5000,74,100,10,0,0,32}},{{0,60,28,64,46,64}}},
+        {0x06,0x00,"Delay LR", {{2500,3750,3752,3750,87,10,0,0,0,32}},{{0,60,28,64,46,64}}},
+        {0x07,0x00,"Echo", {{1700,80,1780,80,10,1700,1780,0,0,40}},{{0,60,28,64,46,64}}},
+        {0x08,0x00,"Cross Delay",{{1700,1750,111,1,10,0,0,0,0,32}},{{0,60,28,64,46,64}}},
+        {0x45,0x00,"Rotary Speaker",{{81,35,0,0,0,24,60,45,54,127}},{{33,52,30,0,0,0}}},
+        {0x46,0x00,"Tremolo",{{83,56,0,0,0,28,64,46,64,127}},{{40,64,10,64,0,0}}},
+        {0x47,0x00,"Auto Pan",{{76,80,32,5,0,28,64,46,64,127}},{{40,64,10,0,0,0}}},
+        {0x48,0x00,"Phaser 1",{{8,111,74,104,0,28,64,46,64,64}},{{6,1,0,0,0,0}}},
+        {0x48,0x08,"Phaser 2",{{8,111,74,108,0,28,64,46,64,64}},{{5,0,4,0,0,0}}},
+        {0x49,0x00,"Distortion",{{40,20,72,53,48,0,43,74,10,127}},{{120,0,0,0,0,0}}},
+        {0x49,0x01,"Comp+Distortion",{{40,20,72,53,48,0,43,74,10,127}},{{120,6,2,100,4,0}}},
+        {0x49,0x08,"Stereo Distortion",{{18,27,71,48,84,0,32,66,10,127}},{{105,0,0,0,0,0}}},
+        {0x4A,0x00,"Overdrive",{{29,24,68,45,55,0,41,72,10,127}},{{104,0,0,0,0,0}}},
+        {0x4A,0x08,"Stereo Overdrive",{{10,24,69,46,105,0,41,66,10,127}},{{104,0,0,0,0,0}}},
+        {0x4B,0x00,"Amp Simulator",{{39,1,48,55,0,0,0,0,0,127}},{{112,0,0,0,0,0}}},
+        {0x4B,0x08,"Stereo Amp Simulator",{{16,2,46,119,0,0,0,0,0,127}},{{106,0,0,0,0,0}}},
+        {0x4C,0x00,"3-Band EQ",{{70,34,60,10,70,28,46,0,0,127}},{{0,0,0,0,0,0}}},
+        {0x4D,0x00,"2-Band EQ",{{28,70,46,70,0,0,0,0,0,127}},{{34,64,10,0,0,0}}},
+        {0x4E,0x00,"Auto Wah",{{70,56,39,25,0,28,66,46,64,127}},{{0,0,0,0,0,0}}},
+        {0x00,0x00,"Thru",{{0,0,0,0,0,0,0,0,0,0}},{{0,0,0,0,0,0}}}
+    }};
+    for (const auto& c : variationDefaultCases)
+    {
+        const auto actual = xg::defaults::getVariationDefaults (c.msb, c.lsb);
+        logTestResult (std::string ("Complete Variation defaults: ") + c.name,
+                       actual.params14Bit == c.p1To10 && actual.params11To16 == c.p11To16);
+    }
+
     // Engine Type Change test via SysEx
     FluidSynthEngine engine;
 
@@ -196,6 +294,125 @@ void testE03_EffectDefaultTables()
     logTestResult ("After Type change to Hall 2, Reverb parameters re-initialized to Hall 2",
                    engine.getReverbParametersForTest().parameters[0] == 25
                    && engine.getReverbParametersForTest().parameters[2] == 28);
+
+    // Editing after a type change must be retained until the next type change.
+    const uint8_t editHall2Time[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x02, 0x3C, 0xF7 };
+    engine.handleSysExForTest (editHall2Time, sizeof (editHall2Time));
+    logTestResult ("Parameter edit after Reverb Type change is retained",
+                   engine.getReverbParametersForTest().parameters[0] == 60);
+
+    const uint8_t setHall1[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x00, 0x01, 0x00, 0xF7 };
+    engine.handleSysExForTest (setHall1, sizeof (setHall1));
+    logTestResult ("Next Reverb Type change discards the preceding edit",
+                   engine.getReverbParametersForTest().parameters == hall1);
+
+    // Variation Type MSB and LSB are sent independently.  Each write must load
+    // the defaults for the resulting complete type, including the intermediate state.
+    const uint8_t setVariationDistMsb[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x40, 0x49, 0xF7 };
+    engine.handleSysExForTest (setVariationDistMsb, sizeof (setVariationDistMsb));
+    const auto distStandard = xg::defaults::getVariationDefaults (0x49, 0x00);
+    logTestResult ("Variation MSB write initializes the intermediate MSB/LSB type",
+                   engine.getVariationParametersForTest().typeMsb == 0x49
+                   && engine.getVariationParametersForTest().typeLsb == 0x00
+                   && engine.getVariationParametersForTest().parameters14Bit == distStandard.params14Bit
+                   && engine.getVariationParametersForTest().parameters11To16 == distStandard.params11To16);
+
+    const uint8_t setVariationStereoLsb[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x41, 0x08, 0xF7 };
+    engine.handleSysExForTest (setVariationStereoLsb, sizeof (setVariationStereoLsb));
+    const auto distStereo = xg::defaults::getVariationDefaults (0x49, 0x08);
+    logTestResult ("Variation LSB write reinitializes all parameters for Stereo Distortion",
+                   engine.getVariationParametersForTest().parameters14Bit == distStereo.params14Bit
+                   && engine.getVariationParametersForTest().parameters11To16 == distStereo.params11To16);
+
+    // Parameter 1 is 14-bit: write MSB then LSB and verify that the edited value
+    // survives after the complete write.
+    const uint8_t editVariationParam1[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x42, 0x00, 0x23, 0xF7 };
+    engine.handleSysExForTest (editVariationParam1, sizeof (editVariationParam1));
+    logTestResult ("Variation parameter edit after Type change is retained",
+                   engine.getVariationParametersForTest().parameters14Bit[0] == 35);
+
+    const uint8_t setVariationStandardLsb[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x41, 0x00, 0xF7 };
+    engine.handleSysExForTest (setVariationStandardLsb, sizeof (setVariationStandardLsb));
+    logTestResult ("Next Variation Type change discards the preceding parameter edit",
+                   engine.getVariationParametersForTest().parameters14Bit == distStandard.params14Bit);
+
+    // Undefined LSB values must consistently fall back to the basic (LSB 00H)
+    // defaults rather than inheriting stale parameters or selecting another subtype.
+    struct UndefinedLsbCase { uint8_t msb; uint8_t undefinedLsb; const char* name; };
+    const std::array<UndefinedLsbCase, 8> undefinedLsbCases {{
+        { 0x01, 0x02, "Hall" }, { 0x02, 0x03, "Room" },
+        { 0x03, 0x02, "Stage" }, { 0x04, 0x01, "Plate" },
+        { 0x45, 0x01, "Rotary Speaker" }, { 0x49, 0x02, "Distortion" },
+        { 0x4A, 0x01, "Overdrive" }, { 0x4B, 0x01, "Amp Simulator" }
+    }};
+    for (const auto& effectCase : undefinedLsbCases)
+    {
+        const auto basic = xg::defaults::getVariationDefaults (effectCase.msb, 0x00);
+        const auto fallback = xg::defaults::getVariationDefaults (effectCase.msb, effectCase.undefinedLsb);
+        logTestResult (std::string (effectCase.name) + " undefined LSB uses basic defaults",
+                       fallback.params14Bit == basic.params14Bit
+                       && fallback.params11To16 == basic.params11To16);
+    }
+
+    // Verify the actual Effect 1 Type Change receive path for every supported
+    // Reverb and Chorus entry, not only the default table helpers.
+    for (const auto& c : reverbDefaultCases)
+    {
+        const uint8_t setType[] = { 0xF0,0x43,0x10,0x4C,0x02,0x01,0x00,c.msb,c.lsb,0xF7 };
+        engine.handleSysExForTest (setType, sizeof (setType));
+        logTestResult (std::string ("Reverb Type Change loads all defaults: ") + c.name,
+                       engine.getReverbParametersForTest().parameters == c.expected);
+    }
+    for (const auto& c : chorusDefaultCases)
+    {
+        const uint8_t setType[] = { 0xF0,0x43,0x10,0x4C,0x02,0x01,0x20,c.msb,c.lsb,0xF7 };
+        engine.handleSysExForTest (setType, sizeof (setType));
+        logTestResult (std::string ("Chorus Type Change loads all defaults: ") + c.name,
+                       engine.getChorusParametersForTest().parameters == c.expected);
+    }
+    {
+        const uint8_t setType[] = { 0xF0,0x43,0x10,0x4C,0x02,0x01,0x20,0x44,0x00,0xF7 };
+        engine.handleSysExForTest (setType, sizeof (setType));
+        logTestResult ("Chorus Type Change loads all defaults: Symphonic",
+                       engine.getChorusParametersForTest().parameters == symphonicDefault.expected);
+    }
+    for (const auto& c : variationDefaultCases)
+    {
+        const uint8_t setType[] = { 0xF0,0x43,0x10,0x4C,0x02,0x01,0x40,c.msb,c.lsb,0xF7 };
+        engine.handleSysExForTest (setType, sizeof (setType));
+        const auto& actual = engine.getVariationParametersForTest();
+        logTestResult (std::string ("Variation Type Change loads all defaults: ") + c.name,
+                       actual.parameters14Bit == c.p1To10 && actual.parameters11To16 == c.p11To16);
+    }
+    for (const auto& c : reverbDefaultCases)
+    {
+        const uint8_t setType[] = { 0xF0,0x43,0x10,0x4C,0x02,0x01,0x40,c.msb,c.lsb,0xF7 };
+        engine.handleSysExForTest (setType, sizeof (setType));
+        const auto& actual = engine.getVariationParametersForTest();
+        bool matches = true;
+        for (size_t i = 0; i < 10; ++i) matches = matches && actual.parameters14Bit[i] == c.expected[i];
+        for (size_t i = 0; i < 6; ++i) matches = matches && actual.parameters11To16[i] == c.expected[i + 10];
+        logTestResult (std::string ("Variation Reverb Type Change loads all defaults: ") + c.name, matches);
+    }
+    for (const auto& c : chorusDefaultCases)
+    {
+        const uint8_t setType[] = { 0xF0,0x43,0x10,0x4C,0x02,0x01,0x40,c.msb,c.lsb,0xF7 };
+        engine.handleSysExForTest (setType, sizeof (setType));
+        const auto& actual = engine.getVariationParametersForTest();
+        bool matches = true;
+        for (size_t i = 0; i < 10; ++i) matches = matches && actual.parameters14Bit[i] == c.expected[i];
+        for (size_t i = 0; i < 6; ++i) matches = matches && actual.parameters11To16[i] == c.expected[i + 10];
+        logTestResult (std::string ("Variation modulation Type Change loads all defaults: ") + c.name, matches);
+    }
+    {
+        const uint8_t setType[] = { 0xF0,0x43,0x10,0x4C,0x02,0x01,0x40,0x44,0x00,0xF7 };
+        engine.handleSysExForTest (setType, sizeof (setType));
+        const auto& actual = engine.getVariationParametersForTest();
+        bool matches = true;
+        for (size_t i = 0; i < 10; ++i) matches = matches && actual.parameters14Bit[i] == symphonicDefault.expected[i];
+        for (size_t i = 0; i < 6; ++i) matches = matches && actual.parameters11To16[i] == symphonicDefault.expected[i + 10];
+        logTestResult ("Variation modulation Type Change loads all defaults: Symphonic", matches);
+    }
 }
 
 // =============================================================================
@@ -916,6 +1133,170 @@ void testE02_DelayFamilySpecialization()
     logTestResult ("Delay LCR output Left has direct tap echo", std::abs (leftOut[441]) > 0.5f);
     // Right channel should receive center echo at ~1323 even with impulse only on left
     logTestResult ("Delay LCR output Right receives center tap echo", std::abs (rightOut[1323]) > 0.1f);
+
+    // Echo: verify the second taps use Parameters 6/7 and their common level is
+    // Parameter 8.  Feedback is neutral (64) so only the four programmed taps occur.
+    p.reset();
+    p.typeMsb = xg::varTypeEcho;
+    p.parameters14Bit[0] = 100; // L1 10ms = 441 samples
+    p.parameters14Bit[1] = 64;  // no L feedback
+    p.parameters14Bit[2] = 120; // R1 12ms = 529.2 samples
+    p.parameters14Bit[3] = 64;  // no R feedback
+    p.parameters14Bit[4] = 10;  // High Damp = 1.0
+    p.parameters14Bit[5] = 200; // L2 20ms = 882 samples
+    p.parameters14Bit[6] = 240; // R2 24ms = 1058.4 samples
+    p.parameters14Bit[7] = 127; // Delay 2 Level
+    p.parameters14Bit[9] = 127; // wet only
+    proc.reset();
+    proc.updateParameters (p);
+    inBuf.clear();
+    outBuf.clear();
+    inBuf.setSample (0, 0, 1.0f);
+    inBuf.setSample (1, 0, 1.0f);
+    proc.process (inBuf, outBuf, 2048);
+    logTestResult ("Echo Parameters 6/7 create L/R Delay 2 taps at programmed times",
+                   std::abs (outBuf.getSample (0, 882)) > 0.9f
+                   && std::abs (outBuf.getSample (1, 1058)) > 0.4f);
+    logTestResult ("Echo Delay 2 does not replace the Parameter 1/3 primary taps",
+                   std::abs (outBuf.getSample (0, 441)) > 0.9f
+                   && std::abs (outBuf.getSample (1, 529)) > 0.4f);
+
+    // Cross Delay Input Select: 0=L, 1=R, 2=L&R.  Inspect the first taps,
+    // before cross-feedback can return to the opposite channel.
+    auto renderCross = [&proc] (int inputSelect)
+    {
+        constexpr int samples = 1600;
+        xg::VariationParameters cp;
+        cp.reset();
+        cp.typeMsb = xg::varTypeCrossDelay;
+        cp.parameters14Bit[0] = 100; // L->R delay / left buffer tap: 10ms
+        cp.parameters14Bit[1] = 120; // R->L delay / right buffer tap: 12ms
+        cp.parameters14Bit[2] = 64;  // no feedback for routing check
+        cp.parameters14Bit[3] = static_cast<uint16_t> (inputSelect);
+        cp.parameters14Bit[4] = 10;
+        cp.parameters14Bit[9] = 127;
+        proc.reset();
+        proc.updateParameters (cp);
+        juce::AudioBuffer<float> input (2, samples), output (2, samples);
+        input.clear();
+        output.clear();
+        input.setSample (0, 0, 1.0f);
+        input.setSample (1, 0, 1.0f);
+        proc.process (input, output, samples);
+        return std::array<float, 2> { std::abs (output.getSample (0, 441)),
+                                      std::abs (output.getSample (1, 529)) };
+    };
+
+    const auto crossL = renderCross (0);
+    const auto crossR = renderCross (1);
+    const auto crossBoth = renderCross (2);
+    logTestResult ("Cross Delay Input Select 0 routes only L input",
+                   crossL[0] > 0.9f && crossL[1] < 0.001f);
+    logTestResult ("Cross Delay Input Select 1 routes only R input",
+                   crossR[0] < 0.001f && crossR[1] > 0.4f);
+    logTestResult ("Cross Delay Input Select 2 routes both inputs",
+                   crossBoth[0] > 0.9f && crossBoth[1] > 0.4f);
+
+    // With L-only input and positive feedback, the first L tap is fed into the
+    // R buffer and must emerge from the R channel after the second delay.
+    p.reset();
+    p.typeMsb = xg::varTypeCrossDelay;
+    p.parameters14Bit[0] = 100;
+    p.parameters14Bit[1] = 120;
+    p.parameters14Bit[2] = 127;
+    p.parameters14Bit[3] = 0;
+    p.parameters14Bit[4] = 10;
+    p.parameters14Bit[9] = 127;
+    proc.reset();
+    proc.updateParameters (p);
+    inBuf.clear();
+    outBuf.clear();
+    inBuf.setSample (0, 0, 1.0f);
+    proc.process (inBuf, outBuf, 2048);
+    logTestResult ("Cross Delay feedback crosses from L to R",
+                   std::abs (outBuf.getSample (1, 970)) > 0.3f);
+
+    // Delay LR: the two primary taps and the independently programmed feedback
+    // delays must appear at the expected samples.
+    p.reset();
+    p.typeMsb = xg::varTypeDelayLR;
+    p.parameters14Bit[0] = 100; // L tap 10ms
+    p.parameters14Bit[1] = 120; // R tap 12ms
+    p.parameters14Bit[2] = 200; // L feedback delay 20ms
+    p.parameters14Bit[3] = 240; // R feedback delay 24ms
+    p.parameters14Bit[4] = 127;
+    p.parameters14Bit[5] = 10;
+    p.parameters14Bit[9] = 127;
+    proc.reset();
+    proc.updateParameters (p);
+    inBuf.clear();
+    outBuf.clear();
+    inBuf.setSample (0, 0, 1.0f);
+    inBuf.setSample (1, 0, 1.0f);
+    proc.process (inBuf, outBuf, 2048);
+    logTestResult ("Delay LR primary taps arrive independently on L/R",
+                   std::abs (outBuf.getSample (0, 441)) > 0.9f
+                   && std::abs (outBuf.getSample (1, 529)) > 0.4f);
+    logTestResult ("Delay LR Parameters 3/4 control independent feedback delays",
+                   std::abs (outBuf.getSample (0, 1323)) > 0.7f
+                   && std::abs (outBuf.getSample (1, 1587)) > 0.2f);
+
+    // Delay LCR Cch Level is a linear level applied to half the L+R center tap.
+    auto renderLcrCenter = [&proc] (uint16_t cchLevel, uint16_t highDamp)
+    {
+        xg::VariationParameters lp;
+        lp.reset();
+        lp.typeMsb = xg::varTypeDelayLCR;
+        lp.parameters14Bit[0] = 100;
+        lp.parameters14Bit[1] = 120;
+        lp.parameters14Bit[2] = 200; // center at 20ms
+        lp.parameters14Bit[3] = 300;
+        lp.parameters14Bit[4] = 64;  // no feedback
+        lp.parameters14Bit[5] = cchLevel;
+        lp.parameters14Bit[6] = highDamp;
+        lp.parameters14Bit[9] = 127;
+        proc.reset();
+        proc.updateParameters (lp);
+        juce::AudioBuffer<float> input (2, 2048), output (2, 2048);
+        input.clear();
+        output.clear();
+        input.setSample (0, 0, 1.0f);
+        proc.process (input, output, 2048);
+        return std::abs (output.getSample (1, 882));
+    };
+    const float centerFull = renderLcrCenter (127, 10);
+    const float centerHalf = renderLcrCenter (64, 10);
+    logTestResult ("Delay LCR Cch Level scales the center tap linearly",
+                   centerFull > 0.45f && isNear (centerHalf / centerFull, 64.0f / 127.0f, 0.03f));
+
+    // High Damp acts only in the feedback path.  At 1 it spreads and attenuates
+    // an impulse compared with 10 (no damping) at the exact repeat sample.
+    auto renderLcrFeedbackPeak = [&proc] (uint16_t highDamp)
+    {
+        xg::VariationParameters lp;
+        lp.reset();
+        lp.typeMsb = xg::varTypeDelayLCR;
+        lp.parameters14Bit[0] = 100; // output tap 10ms
+        lp.parameters14Bit[1] = 120;
+        lp.parameters14Bit[2] = 200;
+        lp.parameters14Bit[3] = 200; // feedback read 20ms
+        lp.parameters14Bit[4] = 127;
+        lp.parameters14Bit[5] = 0;
+        lp.parameters14Bit[6] = highDamp;
+        lp.parameters14Bit[9] = 127;
+        proc.reset();
+        proc.updateParameters (lp);
+        juce::AudioBuffer<float> input (2, 2048), output (2, 2048);
+        input.clear();
+        output.clear();
+        input.setSample (0, 0, 1.0f);
+        proc.process (input, output, 2048);
+        return std::abs (output.getSample (0, 1323)); // 20ms feedback + 10ms tap
+    };
+    const float undampedFeedback = renderLcrFeedbackPeak (10);
+    const float dampedFeedback = renderLcrFeedbackPeak (1);
+    logTestResult ("Delay LCR High Damp audibly attenuates the feedback peak",
+                   undampedFeedback > 0.7f && dampedFeedback < undampedFeedback * 0.2f);
 }
 
 // =============================================================================
@@ -994,6 +1375,293 @@ void testS01_PhysicalMappingReverbChorus()
     const uint8_t setLpf34[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x06, 34, 0xF7 }; // 1.0kHz
     engine.handleSysExForTest (setLpf34, sizeof (setLpf34));
     logTestResult ("Reverb LPF 1kHz gives damping 1.0f", isNear (engine.getReverbProcessorDampingForTest(), 1.0f, 0.01f));
+
+    // 5. Reverb Diffusion (Param 2) and Reserved Param 6 Invariance (TASK-204)
+    // Param 2 = Diffusion (0..10), Address Low 0x03
+    const uint8_t setDiff0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x03, 0, 0xF7 };
+    engine.handleSysExForTest (setDiff0, sizeof (setDiff0));
+    const float widthDiff0 = engine.getReverbProcessorWidthForTest();
+
+    const uint8_t setDiff10[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x03, 10, 0xF7 };
+    engine.handleSysExForTest (setDiff10, sizeof (setDiff10));
+    const float widthDiff10 = engine.getReverbProcessorWidthForTest();
+
+    logTestResult ("Reverb Diffusion (Param 2) maps to width (0->0.2f, 10->1.0f)",
+                   isNear (widthDiff0, 0.2f, 0.01f) && isNear (widthDiff10, 1.0f, 0.01f));
+
+    // Param 6 (Address Low 0x07) is RESERVED in XG specification for Hall/Room/Stage/Plate.
+    // Writing to it must NOT change width or DSP settings.
+    const uint8_t setReservedParam6_0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x07, 0, 0xF7 };
+    engine.handleSysExForTest (setReservedParam6_0, sizeof (setReservedParam6_0));
+    const float widthAfterReserved0 = engine.getReverbProcessorWidthForTest();
+
+    const uint8_t setReservedParam6_127[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x07, 127, 0xF7 };
+    engine.handleSysExForTest (setReservedParam6_127, sizeof (setReservedParam6_127));
+    const float widthAfterReserved127 = engine.getReverbProcessorWidthForTest();
+
+    logTestResult ("Writing to Reverb reserved Parameter 6 preserves width and leaves DSP unaffected",
+                   widthAfterReserved0 == widthDiff10 && widthAfterReserved127 == widthDiff10);
+
+    // Exact decoding of the remaining ESSENTIAL reverb parameters.
+    logTestResult ("Reverb Table#5 delay endpoints are 0.1/99.3/200.0 ms",
+                   isNear (xg::tables::lookupDelayTime200 (0), 0.1f)
+                   && isNear (xg::tables::lookupDelayTime200 (63), 99.3f)
+                   && isNear (xg::tables::lookupDelayTime200 (127), 200.0f));
+
+    VariationEffectProcessor decodedReverb;
+    decodedReverb.prepare (44100.0, 512);
+    xg::VariationParameters decodedParams;
+    decodedParams.reset();
+    decodedParams.typeMsb = xg::varTypeHall1;
+    decodedParams.parameters14Bit[2] = 63;  // Initial Delay: 99.3ms
+    decodedParams.parameters14Bit[3] = 0;   // HPF: Thru
+    decodedParams.parameters11To16[0] = 127; // Reverb Delay: 200ms
+    decodedParams.parameters11To16[1] = 4;   // Density maximum
+    decodedParams.parameters11To16[2] = 64;  // ER/Reverb = 1:1
+    decodedParams.parameters11To16[3] = 10;  // High Damp = 1.0
+    decodedParams.parameters11To16[4] = 64;  // Feedback = 0
+    decodedReverb.updateParameters (decodedParams);
+    logTestResult ("Reverb Initial/Post Delay decode Table#5 to exact sample counts",
+                   isNear (decodedReverb.getReverbInitialDelaySamplesForTest(), 99.3f * 44.1f, 0.1f)
+                   && isNear (decodedReverb.getReverbPostDelaySamplesForTest(), 200.0f * 44.1f, 0.1f));
+    logTestResult ("Reverb Density accepts its complete 0..4 range",
+                   decodedReverb.getReverbDensityForTest() == 4);
+    logTestResult ("Reverb ER/Reverb Balance data 64 decodes to unity ER and Late gains",
+                   isNear (decodedReverb.getReverbErGainForTest(), 1.0f)
+                   && isNear (decodedReverb.getReverbLateGainForTest(), 1.0f));
+    logTestResult ("Reverb High Damp data 10 decodes to 1.0",
+                   isNear (decodedReverb.getReverbHighDampForTest(), 1.0f));
+    logTestResult ("Reverb Feedback Level data 64 decodes to zero feedback",
+                   isNear (decodedReverb.getReverbFeedbackLevelForTest(), 0.0f));
+    logTestResult ("Reverb HPF data 0 selects Thru",
+                   ! decodedReverb.isReverbHpfActiveForTest());
+
+    decodedParams.parameters14Bit[3] = 34;   // HPF 1kHz
+    decodedParams.parameters11To16[1] = 0;   // Density minimum
+    decodedParams.parameters11To16[2] = 0;   // ER only
+    decodedParams.parameters11To16[3] = 1;   // High Damp 0.1
+    decodedParams.parameters11To16[4] = 1;   // Feedback -63
+    decodedReverb.updateParameters (decodedParams);
+    logTestResult ("Reverb minimum Density/ER balance/High Damp/Feedback decode exactly",
+                   decodedReverb.getReverbDensityForTest() == 0
+                   && isNear (decodedReverb.getReverbErGainForTest(), 1.0f)
+                   && isNear (decodedReverb.getReverbLateGainForTest(), 0.0f)
+                   && isNear (decodedReverb.getReverbHighDampForTest(), 0.1f)
+                   && isNear (decodedReverb.getReverbFeedbackLevelForTest(), -0.7f));
+    logTestResult ("Reverb HPF valid frequency activates the filter",
+                   decodedReverb.isReverbHpfActiveForTest());
+
+    decodedParams.parameters11To16[2] = 127; // Late only
+    decodedParams.parameters11To16[3] = 10;
+    decodedParams.parameters11To16[4] = 127; // Feedback +63
+    decodedReverb.updateParameters (decodedParams);
+    logTestResult ("Reverb maximum ER balance and Feedback decode exactly",
+                   isNear (decodedReverb.getReverbErGainForTest(), 0.0f)
+                   && isNear (decodedReverb.getReverbLateGainForTest(), 1.0f)
+                   && isNear (decodedReverb.getReverbFeedbackLevelForTest(), 0.7f));
+
+    // Exercise the actual Part -> System Reverb path as well.  Variation and
+    // System Reverb receive the same effect parameters, so accepting a SysEx
+    // write without changing this path must be caught independently.
+    auto renderSystemReverb = [] (int parameterAddress, uint8_t value)
+    {
+        constexpr int blockSize = 512;
+        constexpr int blockCount = 64;
+        FluidSynthEngine systemEngine;
+        systemEngine.prepare (44100.0, blockSize);
+        const uint8_t xgOn[] = { 0xF0, 0x43, 0x10, 0x4C, 0x00, 0x00, 0x7E, 0x00, 0xF7 };
+        systemEngine.handleSysExForTest (xgOn, sizeof (xgOn));
+        const uint8_t dryOff[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x11, 0x00, 0xF7 };
+        const uint8_t reverbSend[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x13, 0x7F, 0xF7 };
+        const uint8_t chorusSendOff[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x12, 0x00, 0xF7 };
+        const uint8_t variationSendOff[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x14, 0x00, 0xF7 };
+        const uint8_t reverbReturn[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x0C, 0x40, 0xF7 };
+        systemEngine.handleSysExForTest (dryOff, sizeof (dryOff));
+        systemEngine.handleSysExForTest (reverbSend, sizeof (reverbSend));
+        systemEngine.handleSysExForTest (chorusSendOff, sizeof (chorusSendOff));
+        systemEngine.handleSysExForTest (variationSendOff, sizeof (variationSendOff));
+        systemEngine.handleSysExForTest (reverbReturn, sizeof (reverbReturn));
+        if (parameterAddress >= 0)
+        {
+            const uint8_t change[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01,
+                                       static_cast<uint8_t> (parameterAddress), value, 0xF7 };
+            systemEngine.handleSysExForTest (change, sizeof (change));
+        }
+
+        juce::AudioBuffer<float> complete (2, blockSize * blockCount);
+        complete.clear();
+        for (int block = 0; block < blockCount; ++block)
+        {
+            juce::AudioBuffer<float> input (2, blockSize), output (2, blockSize);
+            input.clear();
+            if (block == 0)
+                input.setSample (0, 0, 1.0f);
+            systemEngine.renderBlockWithInjectedPartForTest (output, 0, input);
+            complete.copyFrom (0, block * blockSize, output, 0, 0, blockSize);
+            complete.copyFrom (1, block * blockSize, output, 1, 0, blockSize);
+        }
+        return complete;
+    };
+    const auto systemBaseline = renderSystemReverb (-1, 0);
+    auto systemReverbDifference = [&systemBaseline, &renderSystemReverb] (int address, uint8_t value)
+    {
+        const auto changedOutput = renderSystemReverb (address, value);
+        double difference = 0.0;
+        for (int ch = 0; ch < changedOutput.getNumChannels(); ++ch)
+            for (int i = 0; i < changedOutput.getNumSamples(); ++i)
+                difference += std::abs (changedOutput.getSample (ch, i) - systemBaseline.getSample (ch, i));
+        return difference;
+    };
+    struct SystemReverbCase { int address; uint8_t value; const char* name; };
+    const std::array<SystemReverbCase, 7> systemReverbCases {{
+        { 0x04, 63, "Initial Delay" }, { 0x05, 34, "HPF Cutoff" },
+        { 0x10, 50, "Reverb Delay" }, { 0x11, 0, "Density" },
+        { 0x12, 0, "ER/Reverb Balance" }, { 0x13, 1, "Feedback High Damp" },
+        { 0x14, 127, "Feedback Level" }
+    }};
+    for (const auto& effectCase : systemReverbCases)
+        logTestResult (std::string ("System Reverb ") + effectCase.name
+                           + " changes the rendered impulse response",
+                       systemReverbDifference (effectCase.address, effectCase.value) > 0.01);
+
+    // Audio-domain measurements for the same physical mappings.  These use the
+    // Variation reverb, which shares Table#3/#4 and the JUCE reverb mapping.
+    auto renderVariationReverb = [] (uint16_t time, uint16_t diffusion, uint16_t lpf)
+    {
+        constexpr int samples = 88200; // 2 seconds at 44.1kHz
+        VariationEffectProcessor reverb;
+        reverb.prepare (44100.0, samples);
+        xg::VariationParameters params;
+        params.reset();
+        params.typeMsb = xg::varTypeHall1;
+        params.typeLsb = 0;
+        params.parameters14Bit[0] = time;
+        params.parameters14Bit[1] = diffusion;
+        params.parameters14Bit[4] = lpf;
+        params.parameters14Bit[9] = 127;
+        reverb.updateParameters (params);
+        juce::AudioBuffer<float> input (2, samples), output (2, samples);
+        input.clear();
+        output.clear();
+        input.setSample (0, 0, 1.0f);
+        reverb.process (input, output, samples);
+        return output;
+    };
+
+    const auto shortReverb = renderVariationReverb (0, 10, 60);
+    const auto longReverb = renderVariationReverb (69, 10, 60);
+    const float shortLateRms = shortReverb.getRMSLevel (0, 44100, 44100);
+    const float longLateRms = longReverb.getRMSLevel (0, 44100, 44100);
+    logTestResult ("Reverb Time produces measurably longer late decay (2s impulse response)",
+                   longLateRms > shortLateRms * 2.0f && longLateRms > 0.00001f);
+
+    const auto darkReverb = renderVariationReverb (18, 10, 34);   // 1kHz
+    const auto brightReverb = renderVariationReverb (18, 10, 60); // 20kHz / Thru
+    auto highFrequencyActivity = [] (const juce::AudioBuffer<float>& buffer)
+    {
+        double differentiatedEnergy = 0.0;
+        double totalEnergy = 0.0;
+        for (int i = 1101; i < buffer.getNumSamples(); ++i)
+        {
+            const double sample = buffer.getSample (0, i);
+            const double previous = buffer.getSample (0, i - 1);
+            differentiatedEnergy += (sample - previous) * (sample - previous);
+            totalEnergy += sample * sample;
+        }
+        return static_cast<float> (differentiatedEnergy / std::max (1.0e-12, totalEnergy));
+    };
+    const float darkHf = highFrequencyActivity (darkReverb);
+    const float brightHf = highFrequencyActivity (brightReverb);
+    logTestResult ("Reverb LPF 1kHz has less high-frequency activity than 20kHz/Thru",
+                   brightHf > darkHf * 1.2f);
+
+    const auto narrowReverb = renderVariationReverb (18, 0, 60);
+    const auto wideReverb = renderVariationReverb (18, 10, 60);
+    auto stereoDifferenceEnergy = [] (const juce::AudioBuffer<float>& buffer)
+    {
+        double energy = 0.0;
+        for (int i = 1100; i < buffer.getNumSamples(); ++i)
+        {
+            const double difference = buffer.getSample (0, i) - buffer.getSample (1, i);
+            energy += difference * difference;
+        }
+        return static_cast<float> (energy);
+    };
+    const float narrowStereo = stereoDifferenceEnergy (narrowReverb);
+    const float wideStereo = stereoDifferenceEnergy (wideReverb);
+    logTestResult ("Reverb Diffusion mapping changes measured stereo width",
+                   wideStereo > narrowStereo * 1.2f);
+
+    // The following parameters are valid for the ESSENTIAL Hall/Room/Stage/Plate
+    // algorithms.  Each write must alter the impulse response independently; this
+    // prevents accepting a SysEx value in state while silently ignoring it in DSP.
+    const auto hallDefaults = xg::defaults::getVariationDefaults (0x01, 0x00);
+    auto renderWithReverbParameters = [] (const xg::VariationDefaultParams& values)
+    {
+        constexpr int samples = 88200;
+        VariationEffectProcessor reverb;
+        reverb.prepare (44100.0, samples);
+        xg::VariationParameters params;
+        params.reset();
+        params.typeMsb = xg::varTypeHall1;
+        params.typeLsb = 0;
+        params.parameters14Bit = values.params14Bit;
+        params.parameters11To16 = values.params11To16;
+        params.parameters14Bit[9] = 127;
+        reverb.updateParameters (params);
+        juce::AudioBuffer<float> input (2, samples), output (2, samples);
+        input.clear();
+        output.clear();
+        input.setSample (0, 0, 1.0f);
+        reverb.process (input, output, samples);
+        return output;
+    };
+    const auto baselineReverb = renderWithReverbParameters (hallDefaults);
+    auto impulseResponseDifference = [&baselineReverb, &renderWithReverbParameters]
+                                     (xg::VariationDefaultParams changed)
+    {
+        const auto output = renderWithReverbParameters (changed);
+        double difference = 0.0;
+        for (int ch = 0; ch < output.getNumChannels(); ++ch)
+            for (int i = 0; i < output.getNumSamples(); ++i)
+                difference += std::abs (output.getSample (ch, i) - baselineReverb.getSample (ch, i));
+        return static_cast<float> (difference);
+    };
+
+    auto changed = hallDefaults;
+    changed.params14Bit[2] = 63; // Parameter 3: Initial Delay
+    logTestResult ("Reverb Initial Delay independently changes the impulse response",
+                   impulseResponseDifference (changed) > 0.01f);
+
+    changed = hallDefaults;
+    changed.params14Bit[3] = 34; // Parameter 4: HPF Cutoff
+    logTestResult ("Reverb HPF Cutoff independently changes the impulse response",
+                   impulseResponseDifference (changed) > 0.01f);
+
+    changed = hallDefaults;
+    changed.params11To16[0] = 50; // Parameter 11: Reverb Delay
+    logTestResult ("Reverb Delay independently changes the impulse response",
+                   impulseResponseDifference (changed) > 0.01f);
+
+    changed = hallDefaults;
+    changed.params11To16[1] = 0; // Parameter 12: Density
+    logTestResult ("Reverb Density independently changes the impulse response",
+                   impulseResponseDifference (changed) > 0.01f);
+
+    changed = hallDefaults;
+    changed.params11To16[2] = 0; // Parameter 13: ER/Reverb Balance
+    logTestResult ("Reverb ER/Reverb Balance independently changes the impulse response",
+                   impulseResponseDifference (changed) > 0.01f);
+
+    changed = hallDefaults;
+    changed.params11To16[3] = 1; // Parameter 14: Feedback High Damp
+    logTestResult ("Reverb Feedback High Damp independently changes the impulse response",
+                   impulseResponseDifference (changed) > 0.01f);
+
+    changed = hallDefaults;
+    changed.params11To16[4] = 127; // Parameter 15: Feedback Level
+    logTestResult ("Reverb Feedback Level independently changes the impulse response",
+                   impulseResponseDifference (changed) > 0.01f);
 }
 
 // =============================================================================
@@ -1029,6 +1697,57 @@ void testU02_EssentialVariationTypes()
         tailEnergy += std::abs (outBuf.getSample (0, i)) + std::abs (outBuf.getSample (1, i));
 
     logTestResult ("Variation Reverb (Hall 1) produces wet reverb tail", tailEnergy > 0.01f);
+
+    // All ESSENTIAL reverb variants must be selectable by their official MSB/LSB,
+    // load the same type defaults as the Reverb block, and produce a wet tail.
+    struct EssentialReverbCase { uint8_t msb; uint8_t lsb; const char* name; };
+    const std::array<EssentialReverbCase, 8> reverbCases {{
+        { 0x01, 0x00, "Hall 1" }, { 0x01, 0x01, "Hall 2" },
+        { 0x02, 0x00, "Room 1" }, { 0x02, 0x01, "Room 2" },
+        { 0x02, 0x02, "Room 3" }, { 0x03, 0x00, "Stage 1" },
+        { 0x03, 0x01, "Stage 2" }, { 0x04, 0x00, "Plate" }
+    }};
+
+    for (const auto& effectCase : reverbCases)
+    {
+        const auto expected = xg::defaults::getReverbDefaults (effectCase.msb, effectCase.lsb);
+        const auto actual = xg::defaults::getVariationDefaults (effectCase.msb, effectCase.lsb);
+        bool defaultsMatch = true;
+        for (size_t i = 0; i < 10; ++i)
+            defaultsMatch = defaultsMatch && actual.params14Bit[i] == expected[i];
+        for (size_t i = 0; i < 6; ++i)
+            defaultsMatch = defaultsMatch && actual.params11To16[i] == expected[i + 10];
+        logTestResult (std::string ("Variation ") + effectCase.name + " loads its complete specification defaults",
+                       defaultsMatch);
+
+        xg::VariationParameters rp;
+        rp.reset();
+        rp.typeMsb = effectCase.msb;
+        rp.typeLsb = effectCase.lsb;
+        for (size_t i = 0; i < 10; ++i) rp.parameters14Bit[i] = expected[i];
+        for (size_t i = 0; i < 6; ++i) rp.parameters11To16[i] = expected[i + 10];
+        rp.parameters14Bit[9] = 127;
+
+        VariationEffectProcessor reverbProc;
+        reverbProc.prepare (44100.0, 4096);
+        reverbProc.updateParameters (rp);
+        juce::AudioBuffer<float> impulse (2, 4096), rendered (2, 4096);
+        impulse.clear();
+        rendered.clear();
+        impulse.setSample (0, 0, 1.0f);
+        impulse.setSample (1, 0, 1.0f);
+        reverbProc.process (impulse, rendered, 4096);
+
+        float variantTailEnergy = 0.0f;
+        for (int i = 1100; i < 4096; ++i)
+            variantTailEnergy += std::abs (rendered.getSample (0, i))
+                               + std::abs (rendered.getSample (1, i));
+        logTestResult (std::string ("Variation ") + effectCase.name
+                           + " is selected by its official MSB/LSB and produces reverb",
+                       reverbProc.getCurrentTypeMsb() == effectCase.msb
+                       && reverbProc.getCurrentTypeLsb() == effectCase.lsb
+                       && variantTailEnergy > 0.01f);
+    }
 
     // 2. Rotary Speaker (MSB 0x45)
     p.reset();
@@ -1143,16 +1862,260 @@ void testS02_U03_SubtypesAndParameters11To16()
     proc.updateParameters (p);
     logTestResult ("Delay LCR Param 14 (Low Gain) activates Post-EQ", proc.isPostEqActiveForTest() == true);
 
-    // 4. Subtype LSB differences (Distortion vs Stereo Distortion)
+    // 4. Subtype LSB classification and parameters (Distortion vs Comp+Dist vs Stereo Dist)
     p.reset();
     p.typeMsb = xg::varTypeDistortion;
-    p.typeLsb = 0x00; // Mono Distortion
+    p.typeLsb = 0x00; // Standard Distortion
     proc.updateParameters (p);
-    logTestResult ("Distortion LSB 0x00 stored as currentTypeLsb", proc.getCurrentTypeLsb() == 0x00);
+    logTestResult ("Distortion LSB 0x00 selects Standard subtype",
+                   proc.getDistortionSubtypeForTest() == VariationEffectProcessor::DistortionSubtype::Standard);
 
-    p.typeLsb = 0x02; // Stereo Distortion
+    p.typeLsb = 0x01; // Comp+Distortion
+    p.parameters11To16[1] = 6;   // Comp Attack index 6 -> 7ms (Table#8)
+    p.parameters11To16[2] = 2;   // Comp Release index 2 -> 25ms (Table#9)
+    p.parameters11To16[3] = 100; // Comp Threshold data 100 -> -27dB
+    p.parameters11To16[4] = 4;   // Comp Ratio index 4 -> 5.0 (Table#10)
     proc.updateParameters (p);
-    logTestResult ("Distortion LSB 0x02 stored as currentTypeLsb", proc.getCurrentTypeLsb() == 0x02);
+    logTestResult ("Distortion LSB 0x01 selects CompDist subtype",
+                   proc.getDistortionSubtypeForTest() == VariationEffectProcessor::DistortionSubtype::CompDist);
+    logTestResult ("CompDist correctly decodes Table#8..10 and threshold",
+                   isNear (proc.getCompAttackMsForTest(), 7.0f, 0.1f)
+                   && isNear (proc.getCompReleaseMsForTest(), 25.0f, 0.1f)
+                   && isNear (proc.getCompRatioForTest(), 5.0f, 0.1f)
+                   && isNear (proc.getCompThresholdForTest(), juce::Decibels::decibelsToGain (-27.0f), 0.001f));
+
+    p.typeLsb = 0x08; // Stereo Distortion (Effect Map LSB 08H)
+    proc.updateParameters (p);
+    logTestResult ("Distortion LSB 0x08 selects StereoDist subtype",
+                   proc.getDistortionSubtypeForTest() == VariationEffectProcessor::DistortionSubtype::StereoDist);
+
+    // 5. LSB 02H is reserved for Distortion and must not select Stereo Distortion.
+    p.typeLsb = 0x02;
+    proc.updateParameters (p);
+    logTestResult ("Reserved Distortion LSB 0x02 falls back to Standard subtype",
+                   proc.getDistortionSubtypeForTest() == VariationEffectProcessor::DistortionSubtype::Standard);
+
+    // The default table must use the same official LSB assignments as the DSP selector.
+    const auto distStandardDefaults = xg::defaults::getVariationDefaults (xg::varTypeDistortion, 0x00);
+    const auto distReservedDefaults = xg::defaults::getVariationDefaults (xg::varTypeDistortion, 0x02);
+    const auto distStereoDefaults = xg::defaults::getVariationDefaults (xg::varTypeDistortion, 0x08);
+    logTestResult ("Distortion defaults use LSB 08H for Stereo and keep reserved 02H at basic defaults",
+                   distStereoDefaults.params14Bit[0] == 18
+                   && distReservedDefaults.params14Bit == distStandardDefaults.params14Bit);
+
+    p.reset();
+    p.typeMsb = xg::varTypeOverdrive;
+    p.typeLsb = 0x08;
+    proc.updateParameters (p);
+    logTestResult ("Overdrive LSB 0x08 selects StereoDist subtype",
+                   proc.getDistortionSubtypeForTest() == VariationEffectProcessor::DistortionSubtype::StereoDist);
+
+    const auto overdriveStereoDefaults = xg::defaults::getVariationDefaults (xg::varTypeOverdrive, 0x08);
+    logTestResult ("Stereo Overdrive defaults are selected by LSB 08H",
+                   overdriveStereoDefaults.params14Bit[0] == 10);
+
+    p.typeMsb = xg::varTypeAmpSimulator;
+    proc.updateParameters (p);
+    logTestResult ("Amp Simulator LSB 0x08 selects StereoDist subtype",
+                   proc.getDistortionSubtypeForTest() == VariationEffectProcessor::DistortionSubtype::StereoDist);
+
+    const auto ampStereoDefaults = xg::defaults::getVariationDefaults (xg::varTypeAmpSimulator, 0x08);
+    logTestResult ("Stereo Amp Simulator defaults are selected by LSB 08H",
+                   ampStereoDefaults.params14Bit[0] == 16);
+
+    // 6. Audio DSP measurement: Comp+Distortion dynamics compression vs Standard Distortion
+    const int testNumSamples = 2048;
+    juce::AudioBuffer<float> testIn (2, testNumSamples);
+    for (int i = 0; i < testNumSamples; ++i)
+    {
+        const float s = 0.8f * std::sin (2.0f * 3.14159265f * 440.0f * static_cast<float> (i) / 44100.0f);
+        testIn.setSample (0, i, s);
+        testIn.setSample (1, i, s);
+    }
+
+    // Process with Standard Distortion (00H)
+    p.reset();
+    p.typeMsb = xg::varTypeDistortion;
+    p.typeLsb = 0x00;
+    p.parameters14Bit[0] = 30; // Drive
+    p.parameters14Bit[4] = 64; // Output Level
+    p.parameters14Bit[9] = 127; // 100% Wet
+    proc.reset();
+    proc.updateParameters (p);
+    juce::AudioBuffer<float> outStd (2, testNumSamples);
+    proc.process (testIn, outStd, testNumSamples);
+    const float rmsStd = outStd.getRMSLevel (0, 0, testNumSamples);
+
+    // Process with Comp+Distortion (01H) with active compression (Ratio 10.0, Threshold -35dB)
+    p.typeLsb = 0x01;
+    p.parameters11To16[1] = 0;  // Attack 1ms
+    p.parameters11To16[2] = 3;  // Release 35ms
+    p.parameters11To16[3] = 92; // Threshold -35dB
+    p.parameters11To16[4] = 6;  // Ratio 10.0
+    proc.reset();
+    proc.updateParameters (p);
+    juce::AudioBuffer<float> outComp (2, testNumSamples);
+    proc.process (testIn, outComp, testNumSamples);
+    const float rmsComp = outComp.getRMSLevel (0, 0, testNumSamples);
+
+    logTestResult ("Comp+Distortion dynamically compresses output signal relative to Standard Distortion",
+                   rmsComp < rmsStd * 0.85f);
+
+    // 7. Audio DSP measurement: Stereo separation (Stereo Distortion vs Mono Summing Standard Distortion)
+    // Out-of-phase stereo signal: left = +S, right = -S
+    juce::AudioBuffer<float> outOfPhaseIn (2, testNumSamples);
+    for (int i = 0; i < testNumSamples; ++i)
+    {
+        const float s = 0.5f * std::sin (2.0f * 3.14159265f * 440.0f * static_cast<float> (i) / 44100.0f);
+        outOfPhaseIn.setSample (0, i, s);
+        outOfPhaseIn.setSample (1, i, -s);
+    }
+
+    // Standard Distortion (00H) sums mono (0.5 * (L + R) = 0), yielding cancelled output
+    p.reset();
+    p.typeMsb = xg::varTypeDistortion;
+    p.typeLsb = 0x00;
+    p.parameters14Bit[0] = 30;
+    p.parameters14Bit[9] = 127; // 100% Wet
+    proc.reset();
+    proc.updateParameters (p);
+    juce::AudioBuffer<float> outMono (2, testNumSamples);
+    proc.process (outOfPhaseIn, outMono, testNumSamples);
+    const float rmsMonoCancel = outMono.getRMSLevel (0, 0, testNumSamples);
+
+    // Stereo Distortion (08H) processes channels independently, preserving stereo content
+    p.typeLsb = 0x08;
+    proc.reset();
+    proc.updateParameters (p);
+    juce::AudioBuffer<float> outStereo (2, testNumSamples);
+    proc.process (outOfPhaseIn, outStereo, testNumSamples);
+    const float rmsStereoPreserved = outStereo.getRMSLevel (0, 0, testNumSamples);
+
+    logTestResult ("Standard Distortion mono-sums out-of-phase input (output cancels ~0.0)",
+                   rmsMonoCancel < 0.005f);
+    logTestResult ("Stereo Distortion preserves out-of-phase stereo channels independently",
+                   rmsStereoPreserved > 0.05f);
+
+    // 8. Reserved LSB invariance: writing reserved parameters 12..16 has zero effect
+    p.reset();
+    p.typeMsb = xg::varTypeDistortion;
+    p.typeLsb = 0x02; // Reserved LSB
+    proc.reset();
+    proc.updateParameters (p);
+    juce::AudioBuffer<float> outRes1 (2, testNumSamples);
+    proc.process (testIn, outRes1, testNumSamples);
+
+    p.parameters11To16[1] = 120; // alter reserved parameters
+    p.parameters11To16[2] = 120;
+    proc.reset();
+    proc.updateParameters (p);
+    juce::AudioBuffer<float> outRes2 (2, testNumSamples);
+    proc.process (testIn, outRes2, testNumSamples);
+
+    float diffReserved = 0.0f;
+    for (int i = 0; i < testNumSamples; ++i)
+        diffReserved += std::abs (outRes1.getSample (0, i) - outRes2.getSample (0, i));
+
+    logTestResult ("Writing reserved parameters on reserved LSB leaves audio output completely invariant",
+                   diffReserved < 0.0001f);
+
+    // 9. Every valid Parameter 11..16 item in the supported effect families
+    // must reach DSP.  These comparisons deliberately exercise parameters
+    // whose meaning is not post-EQ (Edge, Stage, phase/input mode and Drive),
+    // so an accidental generic-EQ interpretation cannot satisfy the test.
+    constexpr int parameterRenderSamples = 8192;
+    juce::AudioBuffer<float> parameterInput (2, parameterRenderSamples);
+    for (int i = 0; i < parameterRenderSamples; ++i)
+    {
+        const float t = static_cast<float> (i) / 44100.0f;
+        parameterInput.setSample (0, i, 0.45f * std::sin (2.0f * 3.14159265f * 330.0f * t)
+                                      + 0.15f * std::sin (2.0f * 3.14159265f * 2100.0f * t));
+        parameterInput.setSample (1, i, 0.35f * std::sin (2.0f * 3.14159265f * 550.0f * t)
+                                      - 0.12f * std::sin (2.0f * 3.14159265f * 1700.0f * t));
+    }
+
+    auto renderParameters = [&] (const xg::VariationParameters& values)
+    {
+        VariationEffectProcessor renderer;
+        renderer.prepare (44100.0, parameterRenderSamples);
+        renderer.updateParameters (values);
+        juce::AudioBuffer<float> result (2, parameterRenderSamples);
+        renderer.process (parameterInput, result, parameterRenderSamples);
+        return result;
+    };
+    auto meanDifference = [] (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b)
+    {
+        double difference = 0.0;
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < a.getNumSamples(); ++i)
+                difference += std::abs (a.getSample (ch, i) - b.getSample (ch, i));
+        return static_cast<float> (difference / static_cast<double> (a.getNumSamples() * 2));
+    };
+
+    auto verifyParameterChangesAudio = [&] (uint8_t msb, uint8_t lsb, size_t parameterIndex,
+                                             uint8_t firstValue, uint8_t secondValue, const char* description)
+    {
+        const auto defaults = xg::defaults::getVariationDefaults (msb, lsb);
+        xg::VariationParameters first;
+        first.reset();
+        first.typeMsb = msb;
+        first.typeLsb = lsb;
+        first.parameters14Bit = defaults.params14Bit;
+        first.parameters11To16 = defaults.params11To16;
+        first.parameters14Bit[9] = 127;
+        auto second = first;
+        first.parameters11To16[parameterIndex] = firstValue;
+        second.parameters11To16[parameterIndex] = secondValue;
+        const auto firstOut = renderParameters (first);
+        const auto secondOut = renderParameters (second);
+        logTestResult (description, meanDifference (firstOut, secondOut) > 0.0001f);
+    };
+
+    verifyParameterChangesAudio (xg::varTypeDistortion, 0x00, 0, 0, 127,
+                                 "Distortion Parameter 11 Edge changes the clip curve");
+    verifyParameterChangesAudio (xg::varTypeOverdrive, 0x00, 0, 0, 127,
+                                 "Overdrive Parameter 11 Edge changes the clip curve");
+    verifyParameterChangesAudio (xg::varTypeAmpSimulator, 0x00, 0, 0, 127,
+                                 "Amp Simulator Parameter 11 Edge changes the clip curve");
+    verifyParameterChangesAudio (xg::varTypePhaser, 0x00, 0, 4, 12,
+                                 "Phaser 1 Parameter 11 Stage changes the phaser response");
+    verifyParameterChangesAudio (xg::varTypePhaser, 0x00, 1, 0, 1,
+                                 "Phaser 1 Parameter 12 Diffusion changes mono/stereo processing");
+    verifyParameterChangesAudio (xg::varTypePhaser, 0x08, 2, 4, 124,
+                                 "Phaser 2 Parameter 13 LFO Phase Difference changes stereo phase");
+    verifyParameterChangesAudio (xg::varTypeTremolo, 0x00, 3, 4, 124,
+                                 "Tremolo Parameter 14 LFO Phase Difference changes stereo phase");
+    verifyParameterChangesAudio (xg::varTypeTremolo, 0x00, 4, 0, 1,
+                                 "Tremolo Parameter 15 Input Mode changes mono/stereo processing");
+    verifyParameterChangesAudio (xg::varTypeAutoWah, 0x00, 0, 0, 127,
+                                 "Auto Wah Parameter 11 Drive changes the output");
+
+    // Representative valid post-EQ layouts: Delay uses Parameters 13..16,
+    // while modulation families use Parameters 11..13 for their mid band.
+    struct NamedType { uint8_t type; const char* name; };
+    const std::array<NamedType, 4> delayTypes {{
+        { xg::varTypeDelayLCR, "Delay LCR" }, { xg::varTypeDelayLR, "Delay LR" },
+        { xg::varTypeEcho, "Echo" }, { xg::varTypeCrossDelay, "Cross Delay" }
+    }};
+    for (const auto& c : delayTypes)
+    {
+        xg::VariationParameters values;
+        values.reset();
+        values.typeMsb = c.type;
+        values.parameters11To16[2] = 28;
+        values.parameters11To16[3] = 76;
+        proc.updateParameters (values);
+        logTestResult (std::string (c.name) + " Parameter 14 activates post-EQ",
+                       proc.isPostEqActiveForTest());
+    }
+
+    const std::array<uint8_t, 7> midEqTypes {{ xg::varTypeChorus, xg::varTypeFlanger,
+                                               xg::varTypeSymphonic, xg::varTypeRotarySpeaker,
+                                               xg::varTypeTremolo, xg::varTypeAutoPan,
+                                               xg::varTypePhaser }};
+    for (const auto type : midEqTypes)
+        verifyParameterChangesAudio (type, 0x00, 1, 52, 76,
+                                     "Modulation-family Parameter 12 post-EQ gain changes audio");
 }
 
 // =============================================================================

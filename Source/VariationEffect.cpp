@@ -55,14 +55,26 @@ void VariationEffectProcessor::prepare (double newSampleRate, int newMaxBlockSiz
     spec.maximumBlockSize = static_cast<juce::uint32> (maxBlockSize);
     spec.numChannels = 2;
 
-    phaserProcessor.prepare (spec);
-    phaserProcessor.reset();
+    for (auto& ch : phaserFilterState)
+        ch.fill (0.0f);
+    phaserLastOutput.fill (0.0f);
 
     chorusProcessor.prepare (spec);
     chorusProcessor.reset();
 
     variationReverbProcessor.prepare (spec);
     variationReverbProcessor.reset();
+
+    for (auto& buf : reverbInitialDelayBuffer)
+        buf.assign (static_cast<size_t> (maxReverbDelayBufferSize), 0.0f);
+    for (auto& buf : reverbPostDelayBuffer)
+        buf.assign (static_cast<size_t> (maxReverbDelayBufferSize), 0.0f);
+    reverbInitialDelayWritePos = 0;
+    reverbPostDelayWritePos = 0;
+    reverbErBuffer.setSize (2, maxBlockSize);
+    reverbErBuffer.clear();
+    reverbLateInputBuffer.setSize (2, maxBlockSize);
+    reverbLateInputBuffer.clear();
 
     tempWetBuffer.setSize (2, maxBlockSize);
     tempWetBuffer.clear();
@@ -76,6 +88,15 @@ void VariationEffectProcessor::reset()
         std::fill (buf.begin(), buf.end(), 0.0f);
     delayWritePos = 0;
     delayDampState.fill (0.0f);
+
+    for (auto& buf : reverbInitialDelayBuffer)
+        std::fill (buf.begin(), buf.end(), 0.0f);
+    for (auto& buf : reverbPostDelayBuffer)
+        std::fill (buf.begin(), buf.end(), 0.0f);
+    reverbInitialDelayWritePos = 0;
+    reverbPostDelayWritePos = 0;
+    reverbFbHighDampState.fill (0.0f);
+    for (auto& f : reverbHpfFilters) f.reset();
 
     for (auto& buf : flangerBuffer)
         std::fill (buf.begin(), buf.end(), 0.0f);
@@ -103,9 +124,13 @@ void VariationEffectProcessor::reset()
     eqFiltersActive = false;
     postEqActive = false;
 
-    phaserProcessor.reset();
+    phaserPhase = 0.0f;
+    for (auto& ch : phaserFilterState)
+        ch.fill (0.0f);
+    phaserLastOutput.fill (0.0f);
     chorusProcessor.reset();
     variationReverbProcessor.reset();
+    compEnvelope.fill (0.0f);
 }
 
 void VariationEffectProcessor::setModulationInputs (float mwNorm, float bendNorm, float catNorm, float ac1Norm, float ac2Norm) noexcept
@@ -345,17 +370,76 @@ void VariationEffectProcessor::updateCrossDelayParameters (const xg::VariationPa
 
 void VariationEffectProcessor::updateVariationReverbParameters (const xg::VariationParameters& params)
 {
+    // Param 1: Reverb Time (0..69 -> Table#4: 0.3s..30.0s)
     const float revTimeSec = xg::tables::lookupReverbTime (params.parameters14Bit[0] & 0x7F);
     const float norm = std::log (juce::jmax (0.3f, revTimeSec) / 0.3f) / std::log (30.0f / 0.3f);
     const float roomSize = juce::jlimit (0.05f, 0.98f, 0.10f + 0.88f * std::pow (norm, 0.75f));
 
+    // Param 2: Diffusion (0..10) -> maps to stereo width [0.2, 1.0]
+    const auto diffVal = static_cast<float> (juce::jlimit (0, 10, static_cast<int> (params.parameters14Bit[1] & 0x7F)));
+    const float width = juce::jlimit (0.2f, 1.0f, 0.2f + (diffVal / 10.0f) * 0.8f);
+
+    // Param 3: Initial Delay (0..63 -> Table#5: 0.1ms..99.3ms)
+    const float initDelayMs = xg::tables::lookupDelayTime200 (params.parameters14Bit[2] & 0x7F);
+    reverbInitialDelaySamples = juce::jlimit (1.0f, static_cast<float> (maxReverbDelayBufferSize - 100),
+                                              initDelayMs * 0.001f * static_cast<float> (sampleRate));
+
+    // Param 4: HPF Cutoff Frequency (0..52 -> Table#3: 20Hz..8.0kHz, 0=Thru)
+    const int hpfIdx = static_cast<int> (params.parameters14Bit[3] & 0x7F);
+    if (hpfIdx > 0 && hpfIdx <= 52)
+    {
+        const float hpfFreq = xg::tables::lookupEqFrequency (hpfIdx);
+        const auto coeffs = juce::IIRCoefficients::makeHighPass (sampleRate, juce::jlimit (20.0, sampleRate * 0.49, static_cast<double> (hpfFreq)));
+        for (auto& f : reverbHpfFilters)
+            f.setCoefficients (coeffs);
+        reverbHpfActive = true;
+    }
+    else
+    {
+        reverbHpfActive = false;
+    }
+
+    // Param 5: LPF Cutoff Frequency (34..60 -> Table#3: 1.0kHz..20.0kHz, 60=Thru)
     const float lpfCutoffHz = xg::tables::lookupEqFrequency (params.parameters14Bit[4] & 0x7F);
     const float dampNorm = 1.0f - (std::log10 (juce::jlimit (1000.0f, 20000.0f, lpfCutoffHz) / 1000.0f) / std::log10 (20.0f));
-    const float damping = juce::jlimit (0.0f, 1.0f, dampNorm);
 
-    float width = 1.0f;
-    if (params.parameters14Bit[1] > 0)
-        width = juce::jlimit (0.2f, 1.0f, static_cast<float> (params.parameters14Bit[1] & 0x7F) / 10.0f);
+    // Param 14: Feedback High Damp (1..10 -> 0.1 .. 1.0, default 8)
+    const int highDampIdx = juce::jlimit (1, 10, static_cast<int> (params.parameters11To16[3] > 0 ? (params.parameters11To16[3] & 0x7F) : 8));
+    const float highDampFactor = static_cast<float> (highDampIdx) / 10.0f;
+    reverbFbHighDampCoeff = highDampFactor;
+
+    // High Damp modifies late reverb damping: smaller High Damp means less high frequency energy in tail (higher damping)
+    const float damping = juce::jlimit (0.0f, 1.0f, dampNorm * (1.25f - highDampFactor * 0.3125f));
+
+    // Param 11: Reverb Delay (0..63 -> Table#5: 0.1ms..99.3ms)
+    const float revDelayMs = xg::tables::lookupDelayTime200 (params.parameters11To16[0] & 0x7F);
+    reverbPostDelaySamples = juce::jlimit (1.0f, static_cast<float> (maxReverbDelayBufferSize - 100),
+                                            revDelayMs * 0.001f * static_cast<float> (sampleRate));
+
+    // Param 12: Density (0..4, default 4)
+    reverbDensity = juce::jlimit (0, 4, static_cast<int> (params.parameters11To16[1] & 0x7F));
+
+    // Param 13: ER/Reverb Balance (1..127, 0=ER only, 64=1:1, default 50/64)
+    const int erRevBal = static_cast<int> (params.parameters11To16[2] & 0x7F);
+    if (erRevBal == 0)
+    {
+        reverbErGain = 1.0f;
+        reverbLateGain = 0.0f;
+    }
+    else if (erRevBal <= 64)
+    {
+        reverbErGain = 1.0f;
+        reverbLateGain = static_cast<float> (erRevBal) / 64.0f;
+    }
+    else
+    {
+        reverbErGain = static_cast<float> (127 - erRevBal) / 63.0f;
+        reverbLateGain = 1.0f;
+    }
+
+    // Param 15: Feedback Level (1..127, 64=0, default 64)
+    const int fbData = juce::jlimit (1, 127, static_cast<int> (params.parameters11To16[4] > 0 ? (params.parameters11To16[4] & 0x7F) : 64));
+    reverbFeedbackLevel = (static_cast<float> (fbData) - 64.0f) / 63.0f * 0.7f;
 
     juce::dsp::Reverb::Parameters p;
     p.roomSize = roomSize;
@@ -434,14 +518,70 @@ void VariationEffectProcessor::update2BandEqParameters (const xg::VariationParam
 
 void VariationEffectProcessor::updateDistortionParameters (const xg::VariationParameters& params)
 {
-    isStereoDistortion = (params.typeLsb != 0);
-
     if (currentTypeMsb == xg::varTypeOverdrive)
+    {
         distType = DistortionType::Overdrive;
+        // Overdrive: LSB 00H = Overdrive (mono/summed), 08H = Stereo Overdrive
+        distSubtype = (params.typeLsb == 0x08) ? DistortionSubtype::StereoDist : DistortionSubtype::Standard;
+    }
     else if (currentTypeMsb == xg::varTypeAmpSimulator)
+    {
         distType = DistortionType::AmpSim;
+        // Amp Sim: LSB 00H = Amp Sim, 08H = Stereo Amp Sim
+        distSubtype = (params.typeLsb == 0x08) ? DistortionSubtype::StereoDist : DistortionSubtype::Standard;
+    }
     else
+    {
         distType = DistortionType::Distortion;
+        // Distortion: LSB 00H = Distortion, 01H = Comp+Distortion, 08H = Stereo Distortion
+        // Reserved LSBs fall back to Standard Distortion (00H)
+        if (params.typeLsb == 0x01)
+            distSubtype = DistortionSubtype::CompDist;
+        else if (params.typeLsb == 0x08)
+            distSubtype = DistortionSubtype::StereoDist;
+        else
+            distSubtype = DistortionSubtype::Standard;
+    }
+
+    isStereoDistortion = (distSubtype == DistortionSubtype::StereoDist);
+
+    // Param 11: Edge (Clip Curve) (0..127)
+    distortionEdge = static_cast<float> (params.parameters11To16[0] & 0x7F) / 127.0f;
+
+    // Compressor parameters (active only for Comp+Distortion)
+    if (distSubtype == DistortionSubtype::CompDist)
+    {
+        // Param 12: Comp Attack (Table#8: 0..19 -> 1ms .. 40ms, default 6 = 7ms)
+        const auto attackIdx = static_cast<int> (params.parameters11To16[1] & 0x7F);
+        compAttackMs = xg::tables::lookupCompAttackTime (attackIdx);
+
+        // Param 13: Comp Release (Table#9: 0..15 -> 10ms .. 680ms, default 2 = 25ms)
+        const auto releaseIdx = static_cast<int> (params.parameters11To16[2] & 0x7F);
+        compReleaseMs = xg::tables::lookupCompReleaseTime (releaseIdx);
+
+        // Param 14: Comp Threshold (79..121 -> -48dB .. -6dB, default 100 = -27dB)
+        const auto threshData = static_cast<int> (params.parameters11To16[3] & 0x7F);
+        const auto threshDb = static_cast<float> (juce::jlimit (79, 121, threshData > 0 ? threshData : 100) - 127);
+        compThreshold = juce::Decibels::decibelsToGain (threshDb);
+
+        // Param 15: Comp Ratio (Table#10: 0..7 -> 1.0 .. 20.0, default 4 = 5.0)
+        const auto ratioIdx = static_cast<int> (params.parameters11To16[4] & 0x7F);
+        compRatio = xg::tables::lookupCompRatio (ratioIdx);
+
+        const float sr = static_cast<float> (sampleRate);
+        compAttackCoeff = std::exp (-1.0f / (juce::jmax (0.0001f, compAttackMs * 0.001f) * sr));
+        compReleaseCoeff = std::exp (-1.0f / (juce::jmax (0.0001f, compReleaseMs * 0.001f) * sr));
+    }
+    else
+    {
+        compAttackMs = 7.0f;
+        compReleaseMs = 25.0f;
+        compThreshold = 0.04467f;
+        compRatio = 1.0f;
+        compAttackCoeff = 0.0f;
+        compReleaseCoeff = 0.0f;
+    }
+    compEnvelope.fill (0.0f);
 
     const auto driveVal = static_cast<float> (params.parameters14Bit[0] & 0x7F);
     if (distType == DistortionType::Overdrive)
@@ -518,16 +658,37 @@ void VariationEffectProcessor::updateFlangerParameters (const xg::VariationParam
 
 void VariationEffectProcessor::updatePhaserParameters (const xg::VariationParameters& params)
 {
-    const float rateHz = xg::tables::lookupLfoFrequency (params.parameters14Bit[0] & 0x7F);
-    phaserProcessor.setRate (juce::jmax (0.01f, rateHz));
+    phaserRateHz = xg::tables::lookupLfoFrequency (params.parameters14Bit[0] & 0x7F);
 
     const auto depthVal = static_cast<float> (params.parameters14Bit[1] & 0x7F);
-    basePhaserDepth = depthVal / 127.0f;
-    phaserProcessor.setDepth (basePhaserDepth);
+    phaserDepth = depthVal / 127.0f;
+
+    phaserOffset = static_cast<float> (params.parameters14Bit[2] & 0x7F);
 
     const auto fbVal = params.parameters14Bit[3] > 0 ? static_cast<int> (params.parameters14Bit[3] & 0x7F) : 64;
-    basePhaserFeedback = juce::jlimit (-0.9f, 0.9f, static_cast<float> (fbVal - 64) / 64.0f * 0.85f);
-    phaserProcessor.setFeedback (basePhaserFeedback);
+    phaserFeedback = juce::jlimit (-0.95f, 0.95f, static_cast<float> (fbVal - 64) / 64.0f * 0.85f);
+
+    if (currentTypeLsb == 0x08) // Phaser 2
+    {
+        // Param 11: Stage (3..6, default 5)
+        const int s = params.parameters11To16[0] > 0 ? static_cast<int> (params.parameters11To16[0] & 0x7F) : 5;
+        phaserStages = juce::jlimit (3, 6, s);
+
+        // Param 13: LFO Phase Difference (4..124 -> -180..+180 deg, default 4 = -180 deg)
+        const int phDiffVal = params.parameters11To16[2] > 0 ? static_cast<int> (params.parameters11To16[2] & 0x7F) : 4;
+        phaserLfoPhaseDiff = (static_cast<float> (phDiffVal) - 64.0f) * (juce::MathConstants<float>::pi / 60.0f);
+        phaserDiffusionMono = false;
+    }
+    else // Phaser 1
+    {
+        // Param 11: Stage (4..12, default 6)
+        const int s = params.parameters11To16[0] > 0 ? static_cast<int> (params.parameters11To16[0] & 0x7F) : 6;
+        phaserStages = juce::jlimit (4, 12, s);
+
+        // Param 12: Diffusion (0=mono, 1=stereo, default 1)
+        phaserDiffusionMono = (params.parameters11To16[1] == 0);
+        phaserLfoPhaseDiff = 0.0f;
+    }
 
     updateDryWet (static_cast<uint8_t> (params.parameters14Bit[9] & 0x7F), 0.5f);
 
@@ -549,6 +710,21 @@ void VariationEffectProcessor::updateTremoloAutoPanParameters (const xg::Variati
 
     const auto depthVal = static_cast<float> (params.parameters14Bit[1] & 0x7F);
     modDepth = juce::jlimit (0.0f, 1.0f, depthVal / 127.0f);
+
+    if (!isAutoPan)
+    {
+        // Param 14: LFO Phase Difference (4..124 -> -180..+180 deg, default 64 = 0 deg)
+        const int phDiffVal = params.parameters11To16[3] > 0 ? static_cast<int> (params.parameters11To16[3] & 0x7F) : 64;
+        tremoloLfoPhaseDiff = (static_cast<float> (phDiffVal) - 64.0f) * (juce::MathConstants<float>::pi / 60.0f);
+
+        // Param 15: Input Mode (0=mono, 1=stereo, default 0=mono)
+        tremoloMonoInput = (params.parameters11To16[4] == 0);
+    }
+    else
+    {
+        tremoloLfoPhaseDiff = 0.0f;
+        tremoloMonoInput = false;
+    }
 
     updateDryWet (static_cast<uint8_t> (params.parameters14Bit[9] & 0x7F), 1.0f);
 
@@ -603,6 +779,9 @@ void VariationEffectProcessor::updateAutoWahParameters (const xg::VariationParam
     wahResonance = resoVal >= 10 ? juce::jlimit (1.0f, 10.0f, static_cast<float> (resoVal) / 10.0f)
                                  : juce::jlimit (1.0f, 10.0f, 1.0f + static_cast<float> (resoVal) * 0.2f);
 
+    // Param 11: Drive (0..127)
+    autoWahDrive = static_cast<float> (params.parameters11To16[0] & 0x7F) / 127.0f;
+
     updateDryWet (static_cast<uint8_t> (params.parameters14Bit[9] & 0x7F), 1.0f);
 
     const float eqLowFreq = xg::tables::lookupEqFrequency (params.parameters14Bit[5] & 0x7F);
@@ -630,6 +809,10 @@ void VariationEffectProcessor::updateParameters (const xg::VariationParameters& 
         case xg::varTypeRoom1:
         case xg::varTypeStage1:
         case xg::varTypePlate:
+        case xg::varTypeWhiteRoom:
+        case xg::varTypeTunnel:
+        case xg::varTypeCanyon:
+        case xg::varTypeBasement:
             updateVariationReverbParameters (params);
             break;
 
@@ -808,20 +991,105 @@ void VariationEffectProcessor::processVariationReverb (const float* inL, const f
     tempWetBuffer.copyFrom (0, 0, inL, numSamples);
     tempWetBuffer.copyFrom (1, 0, inR, numSamples);
 
-    juce::dsp::AudioBlock<float> block (tempWetBuffer.getArrayOfWritePointers(), 2, 0, static_cast<size_t> (numSamples));
-    juce::dsp::ProcessContextReplacing<float> context (block);
-    variationReverbProcessor.process (context);
+    auto* sigL = tempWetBuffer.getWritePointer (0);
+    auto* sigR = tempWetBuffer.getWritePointer (1);
 
-    auto* wetL = tempWetBuffer.getWritePointer (0);
-    auto* wetR = tempWetBuffer.getWritePointer (1);
+    // 1. HPF Cutoff Frequency (Param 4)
+    if (reverbHpfActive)
+    {
+        reverbHpfFilters[0].processSamples (sigL, numSamples);
+        reverbHpfFilters[1].processSamples (sigR, numSamples);
+    }
 
-    if (postEqActive)
-        applyPostEq (wetL, wetR, numSamples);
+    if (reverbErBuffer.getNumSamples() < numSamples)
+    {
+        reverbErBuffer.setSize (2, numSamples, false, false, true);
+        reverbLateInputBuffer.setSize (2, numSamples, false, false, true);
+    }
+
+    reverbErBuffer.clear();
+    reverbLateInputBuffer.clear();
+
+    auto* erL = reverbErBuffer.getWritePointer (0);
+    auto* erR = reverbErBuffer.getWritePointer (1);
+    auto* lateInL = reverbLateInputBuffer.getWritePointer (0);
+    auto* lateInR = reverbLateInputBuffer.getWritePointer (1);
+
+    auto* initBufL = reverbInitialDelayBuffer[0].data();
+    auto* initBufR = reverbInitialDelayBuffer[1].data();
+    auto* revBufL = reverbPostDelayBuffer[0].data();
+    auto* revBufR = reverbPostDelayBuffer[1].data();
+
+    const float sr = static_cast<float> (sampleRate);
+    const float dtSamples = sr * 0.001f;
+    const float densityScale = static_cast<float> (reverbDensity) / 4.0f;
+
+    auto interpolateReverbDelay = [] (const float* buffer, float readPos) noexcept -> float
+    {
+        while (readPos < 0.0f)
+            readPos += static_cast<float> (maxReverbDelayBufferSize);
+        const auto idx0 = static_cast<int> (readPos) % maxReverbDelayBufferSize;
+        const auto idx1 = (idx0 + 1) % maxReverbDelayBufferSize;
+        const auto frac = readPos - static_cast<float> (static_cast<int> (readPos));
+        return (1.0f - frac) * buffer[idx0] + frac * buffer[idx1];
+    };
 
     for (int i = 0; i < numSamples; ++i)
     {
-        outL[i] = inL[i] * dryGain + wetL[i] * wetGain;
-        outR[i] = inR[i] * dryGain + wetR[i] * wetGain;
+        // Read Initial Delay
+        const float delayedInitL = interpolateReverbDelay (initBufL, static_cast<float> (reverbInitialDelayWritePos) - reverbInitialDelaySamples);
+        const float delayedInitR = interpolateReverbDelay (initBufR, static_cast<float> (reverbInitialDelayWritePos) - reverbInitialDelaySamples);
+
+        // Feedback loop with High Damp
+        reverbFbHighDampState[0] += (1.0f - reverbFbHighDampCoeff) * (delayedInitL - reverbFbHighDampState[0]);
+        reverbFbHighDampState[1] += (1.0f - reverbFbHighDampCoeff) * (delayedInitR - reverbFbHighDampState[1]);
+
+        initBufL[reverbInitialDelayWritePos] = sigL[i] + reverbFbHighDampState[0] * reverbFeedbackLevel;
+        initBufR[reverbInitialDelayWritePos] = sigR[i] + reverbFbHighDampState[1] * reverbFeedbackLevel;
+
+        // Early reflections from initial delay buffer
+        const float erTapL1 = interpolateReverbDelay (initBufL, static_cast<float> (reverbInitialDelayWritePos) - reverbInitialDelaySamples - 7.3f * dtSamples);
+        const float erTapL2 = interpolateReverbDelay (initBufR, static_cast<float> (reverbInitialDelayWritePos) - reverbInitialDelaySamples - 22.1f * dtSamples);
+        const float erTapR1 = interpolateReverbDelay (initBufR, static_cast<float> (reverbInitialDelayWritePos) - reverbInitialDelaySamples - 11.8f * dtSamples);
+        const float erTapR2 = interpolateReverbDelay (initBufL, static_cast<float> (reverbInitialDelayWritePos) - reverbInitialDelaySamples - 29.5f * dtSamples);
+
+        erL[i] = delayedInitL * 0.6f + (erTapL1 * 0.5f + erTapL2 * 0.35f) * densityScale * reverbFbHighDampCoeff;
+        erR[i] = delayedInitR * 0.6f + (erTapR1 * 0.5f + erTapR2 * 0.35f) * densityScale * reverbFbHighDampCoeff;
+
+        // Feed to Reverb Post Delay buffer
+        revBufL[reverbPostDelayWritePos] = delayedInitL;
+        revBufR[reverbPostDelayWritePos] = delayedInitR;
+
+        // Read Reverb Post Delay output for Late Reverb
+        lateInL[i] = interpolateReverbDelay (revBufL, static_cast<float> (reverbPostDelayWritePos) - reverbPostDelaySamples);
+        lateInR[i] = interpolateReverbDelay (revBufR, static_cast<float> (reverbPostDelayWritePos) - reverbPostDelaySamples);
+
+        reverbInitialDelayWritePos = (reverbInitialDelayWritePos + 1) % maxReverbDelayBufferSize;
+        reverbPostDelayWritePos = (reverbPostDelayWritePos + 1) % maxReverbDelayBufferSize;
+    }
+
+    // Process Late Reverb
+    juce::dsp::AudioBlock<float> block (reverbLateInputBuffer.getArrayOfWritePointers(), 2, 0, static_cast<size_t> (numSamples));
+    juce::dsp::ProcessContextReplacing<float> context (block);
+    variationReverbProcessor.process (context);
+
+    auto* lateOutL = reverbLateInputBuffer.getWritePointer (0);
+    auto* lateOutR = reverbLateInputBuffer.getWritePointer (1);
+
+    // Combine ER and Late Reverb
+    for (int i = 0; i < numSamples; ++i)
+    {
+        sigL[i] = erL[i] * reverbErGain + lateOutL[i] * reverbLateGain;
+        sigR[i] = erR[i] * reverbErGain + lateOutR[i] * reverbLateGain;
+    }
+
+    if (postEqActive)
+        applyPostEq (sigL, sigR, numSamples);
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        outL[i] = inL[i] * dryGain + sigL[i] * wetGain;
+        outR[i] = inR[i] * dryGain + sigR[i] * wetGain;
     }
 }
 
@@ -918,6 +1186,41 @@ void VariationEffectProcessor::processDistortion (const float* inL, const float*
     auto* wetL = tempWetBuffer.getWritePointer (0);
     auto* wetR = tempWetBuffer.getWritePointer (1);
 
+    if (distSubtype != DistortionSubtype::StereoDist)
+    {
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float mono = 0.5f * (wetL[i] + wetR[i]);
+            wetL[i] = mono;
+            wetR[i] = mono;
+        }
+    }
+
+    // 1. Compressor dynamics (Comp+Distortion)
+    if (distSubtype == DistortionSubtype::CompDist && compRatio > 1.001f)
+    {
+        for (int i = 0; i < numSamples; ++i)
+        {
+            float* chPtrs[2] = { &wetL[i], &wetR[i] };
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                const float inAbs = std::abs (*chPtrs[ch]);
+                if (inAbs > compEnvelope[static_cast<size_t> (ch)])
+                    compEnvelope[static_cast<size_t> (ch)] = compAttackCoeff * compEnvelope[static_cast<size_t> (ch)] + (1.0f - compAttackCoeff) * inAbs;
+                else
+                    compEnvelope[static_cast<size_t> (ch)] = compReleaseCoeff * compEnvelope[static_cast<size_t> (ch)] + (1.0f - compReleaseCoeff) * inAbs;
+
+                const float env = compEnvelope[static_cast<size_t> (ch)];
+                if (env > compThreshold && compThreshold > 1e-6f)
+                {
+                    const float overRatio = env / compThreshold;
+                    const float grLinear = std::pow (overRatio, (1.0f / compRatio) - 1.0f);
+                    *chPtrs[ch] *= grLinear;
+                }
+            }
+        }
+    }
+
     if (distFiltersActive)
     {
         distPreFilters[0].processSamples (wetL, numSamples);
@@ -930,29 +1233,37 @@ void VariationEffectProcessor::processDistortion (const float* inL, const float*
 
     for (int i = 0; i < numSamples; ++i)
     {
-        float l = wetL[i] * effDrive;
-        float r = wetR[i] * effDrive;
+        float l = wetL[i];
+        float r = wetR[i];
+
+        l *= effDrive;
+        r *= effDrive;
 
         if (distType == DistortionType::Overdrive)
         {
-            wetL[i] = (l > 0.0f) ? (l / (1.0f + l)) : (l / (1.0f - 0.6f * l));
-            wetR[i] = (r > 0.0f) ? (r / (1.0f + r)) : (r / (1.0f - 0.6f * r));
+            const float kPos = 0.5f + distortionEdge * 1.0f;
+            const float kNeg = 0.3f + distortionEdge * 0.6f;
+            l = (l > 0.0f) ? (l / (1.0f + kPos * l)) : (l / (1.0f - kNeg * l));
+            r = (r > 0.0f) ? (r / (1.0f + kPos * r)) : (r / (1.0f - kNeg * r));
         }
         else if (distType == DistortionType::AmpSim)
         {
-            wetL[i] = std::tanh (l);
-            wetR[i] = std::tanh (r);
+            const float edgeScale = 0.6f + distortionEdge * 0.8f;
+            l = std::tanh (l * edgeScale);
+            r = std::tanh (r * edgeScale);
         }
         else
         {
-            const auto xL = juce::jlimit (-1.5f, 1.5f, l * 1.2f);
-            const auto xR = juce::jlimit (-1.5f, 1.5f, r * 1.2f);
-            wetL[i] = xL - 0.15f * xL * xL * xL;
-            wetR[i] = xR - 0.15f * xR * xR * xR;
+            const float edgeScale = 0.8f + distortionEdge * 0.8f;
+            const auto xL = juce::jlimit (-1.5f, 1.5f, l * edgeScale);
+            const auto xR = juce::jlimit (-1.5f, 1.5f, r * edgeScale);
+            const float cubic = 0.05f + 0.15f * distortionEdge;
+            l = xL - cubic * xL * xL * xL;
+            r = xR - cubic * xR * xR * xR;
         }
 
-        wetL[i] *= effOutGain;
-        wetR[i] *= effOutGain;
+        wetL[i] = l * effOutGain;
+        wetR[i] = r * effOutGain;
     }
 
     if (distFiltersActive)
@@ -1034,19 +1345,65 @@ void VariationEffectProcessor::processFlanger (const float* inL, const float* in
 
 void VariationEffectProcessor::processPhaser (const float* inL, const float* inR, float* outL, float* outR, int numSamples) noexcept
 {
-    tempWetBuffer.copyFrom (0, 0, inL, numSamples);
-    tempWetBuffer.copyFrom (1, 0, inR, numSamples);
+    const auto phaseInc = (twoPi * phaserRateHz) / static_cast<float> (sampleRate);
+    const float effDepth = juce::jlimit (0.0f, 1.0f, phaserDepth + currentModOffset * 0.4f);
+    const float effFb = juce::jlimit (-0.95f, 0.95f, phaserFeedback + currentModOffset * 0.3f);
 
-    phaserProcessor.setDepth (juce::jlimit (0.0f, 1.0f, basePhaserDepth + currentModOffset * 0.4f));
-    phaserProcessor.setFeedback (juce::jlimit (-0.95f, 0.95f, basePhaserFeedback + currentModOffset * 0.3f));
-
-    juce::dsp::AudioBlock<float> block (tempWetBuffer);
-    auto subBlock = block.getSubBlock (0, static_cast<size_t> (numSamples));
-    juce::dsp::ProcessContextReplacing<float> context (subBlock);
-    phaserProcessor.process (context);
+    const float baseFreq = 300.0f + (phaserOffset / 127.0f) * 1200.0f; // 300Hz..1500Hz
+    const float nyquist = static_cast<float> (sampleRate * 0.49);
+    const float halfDiff = 0.5f * phaserLfoPhaseDiff;
 
     auto* wetL = tempWetBuffer.getWritePointer (0);
     auto* wetR = tempWetBuffer.getWritePointer (1);
+
+    constexpr int kFreqUpdateInterval = 4;
+    float aL = 0.0f, aR = 0.0f;
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        phaserPhase += phaseInc;
+        if (phaserPhase >= twoPi) phaserPhase -= twoPi;
+
+        if ((i % kFreqUpdateInterval) == 0)
+        {
+            const float modL = std::sin (phaserPhase - halfDiff);
+            const float modR = std::sin (phaserPhase + halfDiff);
+
+            const float fcL = juce::jlimit (40.0f, nyquist, baseFreq * std::pow (2.0f, effDepth * modL * 2.5f));
+            const float fcR = juce::jlimit (40.0f, nyquist, baseFreq * std::pow (2.0f, effDepth * modR * 2.5f));
+
+            const float tanL = std::tan (juce::MathConstants<float>::pi * fcL / static_cast<float> (sampleRate));
+            aL = (tanL - 1.0f) / (tanL + 1.0f);
+
+            const float tanR = std::tan (juce::MathConstants<float>::pi * fcR / static_cast<float> (sampleRate));
+            aR = (tanR - 1.0f) / (tanR + 1.0f);
+        }
+
+        const float inChanL = phaserDiffusionMono ? 0.5f * (inL[i] + inR[i]) : inL[i];
+        const float inChanR = phaserDiffusionMono ? 0.5f * (inL[i] + inR[i]) : inR[i];
+
+        // Left Channel Allpass Chain
+        float xL = inChanL + effFb * phaserLastOutput[0];
+        for (int s = 0; s < phaserStages; ++s)
+        {
+            const float v = xL - aL * phaserFilterState[0][static_cast<size_t> (s)];
+            xL = aL * v + phaserFilterState[0][static_cast<size_t> (s)];
+            phaserFilterState[0][static_cast<size_t> (s)] = v;
+        }
+        phaserLastOutput[0] = xL;
+        wetL[i] = 0.5f * (inChanL + xL);
+
+        // Right Channel Allpass Chain
+        float xR = inChanR + effFb * phaserLastOutput[1];
+        for (int s = 0; s < phaserStages; ++s)
+        {
+            const float v = xR - aR * phaserFilterState[1][static_cast<size_t> (s)];
+            xR = aR * v + phaserFilterState[1][static_cast<size_t> (s)];
+            phaserFilterState[1][static_cast<size_t> (s)] = v;
+        }
+        phaserLastOutput[1] = xR;
+        wetR[i] = 0.5f * (inChanR + xR);
+    }
 
     if (postEqActive)
         applyPostEq (wetL, wetR, numSamples);
@@ -1082,13 +1439,16 @@ void VariationEffectProcessor::processTremoloAutoPan (const float* inL, const fl
         }
         else
         {
-            const auto trem = 1.0f - effDepth * (0.5f + 0.5f * std::sin (modPhase));
-            lGain = trem;
-            rGain = trem;
+            const float halfDiff = 0.5f * tremoloLfoPhaseDiff;
+            lGain = 1.0f - effDepth * (0.5f + 0.5f * std::sin (modPhase - halfDiff));
+            rGain = 1.0f - effDepth * (0.5f + 0.5f * std::sin (modPhase + halfDiff));
         }
 
-        wetL[i] = inL[i] * lGain;
-        wetR[i] = inR[i] * rGain;
+        const float lInput = (!isAutoPan && tremoloMonoInput) ? 0.5f * (inL[i] + inR[i]) : inL[i];
+        const float rInput = (!isAutoPan && tremoloMonoInput) ? 0.5f * (inL[i] + inR[i]) : inR[i];
+
+        wetL[i] = lInput * lGain;
+        wetR[i] = rInput * rGain;
     }
 
     if (postEqActive)
@@ -1159,8 +1519,18 @@ void VariationEffectProcessor::processAutoWah (const float* inL, const float* in
         const auto lFilt = wahFilters[0].processSingleSampleRaw (lIn);
         const auto rFilt = wahFilters[1].processSingleSampleRaw (rIn);
 
-        wetL[i] = lIn * 0.2f + lFilt * (wahResonance * 0.6f);
-        wetR[i] = rIn * 0.2f + rFilt * (wahResonance * 0.6f);
+        const float driveGain = 1.0f + autoWahDrive * 4.0f;
+        float lSig = (lIn * 0.2f + lFilt * (wahResonance * 0.6f)) * driveGain;
+        float rSig = (rIn * 0.2f + rFilt * (wahResonance * 0.6f)) * driveGain;
+
+        if (autoWahDrive > 0.001f)
+        {
+            lSig = std::tanh (lSig) / std::sqrt (driveGain);
+            rSig = std::tanh (rSig) / std::sqrt (driveGain);
+        }
+
+        wetL[i] = lSig;
+        wetR[i] = rSig;
     }
 
     if (postEqActive)
@@ -1194,6 +1564,10 @@ void VariationEffectProcessor::process (const juce::AudioBuffer<float>& inBuffer
         case xg::varTypeRoom1:
         case xg::varTypeStage1:
         case xg::varTypePlate:
+        case xg::varTypeWhiteRoom:
+        case xg::varTypeTunnel:
+        case xg::varTypeCanyon:
+        case xg::varTypeBasement:
             processVariationReverb (inL, inR, outL, outR, numSamples);
             break;
 

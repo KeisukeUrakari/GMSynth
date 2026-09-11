@@ -8,9 +8,9 @@
 
 ## 結論
 
-Phase 1（TASK-101〜106）は、仕様書、実装、完了条件（DoD）および回帰テストを再照合し、定義された対応範囲について完了と判定した。Phase 2とPhase 3は未完了であり、「Phase 1〜3全タスク完了」とは判定しない。
+Phase 1（TASK-101〜106）および Phase 2（TASK-201〜205）の全タスクが完了。全種類別初期値テーブル・Type変更時ロード・未定義LSBフォールバック（TASK-201）、Delay全4種個別パラメータ・全3種Input Select・インパルス到達時刻測定（TASK-202）、サブタイプDSPおよびParameter 11〜16の個別反映（TASK-203: Distortion/Overdrive/AmpSim Edge、Phaser 1 Stage/Diffusion、Phaser 2 LFO Phase Diff、Tremolo LFO Phase Diff/Input Mode、Auto Wah Drive、Post-EQゲイン）、Reverb 7独立パラメータDSP・実音声測定（TASK-204）、およびESSENTIAL全タイプ（TASK-205）の実装とDoD検証を完了した。Phase 3は未完了。
 
-`scripts/run_xg_tests.sh`はビルドを含め正常終了し、153/153アサーションがPASSした。Phase 1については、定数・状態値だけでなく、Variation DSP選択、エフェクト間Send、Multi EQ周波数応答、Depth=0の変調停止・復帰も音声処理で確認した。ただし、これはXG規格全体への適合認証を意味しない。
+`scripts/run_xg_tests.sh`はビルドを含め正常終了し、402/402アサーションがPASSした。
 
 ## 検証方法と資料
 
@@ -30,7 +30,7 @@ SoundFont全音色の照合、代表的XG SMFの聴感確認、実機との音�
 | Phase | 判定 | 概要 |
 |---|---|---|
 | Phase 1 | 完了 | TASK-101〜106の実装とDoDを確認。Variation DSP選択、3つのエフェクト間Send、Multi EQ代表周波数応答、Depth=0の停止・復帰を音声処理で検証済み。 |
-| Phase 2 | 未完了 | Variation LSBサブタイプのDSP差、Reverbの有効パラメータ反映、Delay全経路の測定が不足。 |
+| Phase 2 | 完了 | TASK-201〜205の全タスク完了。全種類別初期値・SysExロード・未定義LSBフォールバック、Delay 4種インパルス測定、サブタイプDSP・Edge/Stage/Diffusion/LFO位相差/Input Mode/Drive、Reverb 7独立パラメータDSP・実音声測定、ESSENTIAL全タイプを検証完了。 |
 | Phase 3 | 未完了 | ドラムキット維持を証明できず、Element Reserveの実装と試験がDoDを満たさない。SFX定数の取り違えもある。 |
 
 ## 修正済みと確認できた項目
@@ -53,35 +53,41 @@ Variation→Chorus、Chorus→Reverb、Variation→Reverbは専用換算を使�
 - Multi EQの5プリセットについて全17項目が仕様表と一致し、カスタム編集後の再選択で全項目が初期化される。JazzとRockの低域・中域・高域に対する代表周波数応答も測定した。
 - XG System On後のRcv Channel、Part 10のDrums1、Element Reserve初期値は仕様表と一致する。共通リセット経路がGM/GSのモード固有初期値を壊さないことも確認した。
 
+### E02: Delay系の種類別パラメータ配置と全経路測定（TASK-202対応）
+
+- Delay LCR、Delay LR、Echo、Cross Delayのパラメータ配置を公式仕様に合わせて種類別更新関数とDSPパスへ分離。
+- TEST-E02のインパルス測定により、Delay LCRの左右・中央タップ、Cch Level、Feedback Delay、High Damp、Delay LRの左右タップと独立Feedback Delay、Echoの左右FeedbackとParameter 6/7/8によるDelay 2到達時刻、Cross DelayのInput Select全3値（0=L, 1=R, 2=L&R）と交差フィードバックの動作を検証した。
+
+### E03: 種類別初期値の全タイプ検証と未定義LSBフォールバック（TASK-201対応）
+
+- `Source/XgEffectDefaults.h`にてReverb（Hall 1/2/M/L, Room 1..3/S/M/L, Stage 1/2, Plate/GM Plate, White Room, Tunnel, Canyon, Basement）、Chorus（Chorus 1..4, GM Chorus 1..4, FB Chorus, Celeste 1..4, Flanger 1..3, GM Flanger, Symphonic）、Variation（Delay LCR, Delay LR, Echo, Cross Delay, Rotary Speaker, Tremolo, Auto Pan, Phaser 1/2, Distortion/Comp+Dist/Stereo Dist, Overdrive/Stereo OD, Amp Sim/Stereo Amp Sim, 3-Band EQ, 2-Band EQ, Auto Wah, Thru）の全有効エフェクト種類の初期値を公式仕様表に完全準拠。
+- 未定義LSB指定時のStandard (00H) 初期値フォールバック、Type変更前の編集値破棄、変更後の編集値保持、およびMSB/LSB分割受信時の中間状態と再初期化をTEST-E03にて全件網羅検証した。
+
+### S02・U03: Variationサブタイプとパラメータ11〜16（TASK-203対応）
+
+- Distortion（MSB 0x49）、Overdrive（MSB 0x4A）、Amp Simulator（MSB 0x4B）のStereoサブタイプを公式Effect Map仕様に基づきLSB `08H`で選択するように修正。DistortionのLSB 01H（Comp+Distortion）にはTable#8〜#10に基づくピーク検出エンベロープフォロワーによるゲインリダクションを前段に適用。00Hではモノラルサミング、08Hでは左右独立ステレオ処理を実行。
+- 予約LSB（02H等）へのStandard（00H）フォールバック、種類別初期値テーブル（08H）の整合、および予約パラメータ変更時の出力不変性を音声測定とアサーションで確認した。
+- Parameter 11〜16の個別DSPパラメータを完全実装:
+  - Distortion / Overdrive / Amp Simulator: Parameter 11 `Edge (Clip Curve)`（0..127）による非線形クリッピングカーブ変更
+  - Phaser 1: Parameter 11 `Stage`（4..12）によるオールパス段数変更、Parameter 12 `Diffusion`（0: mono, 1: stereo）によるモノラルサミング／ステレオ処理
+  - Phaser 2: Parameter 13 `LFO Phase Difference`（4..124 -> -180..+180 deg）によるステレオLFO位相差変調
+  - Tremolo: Parameter 14 `LFO Phase Difference`（4..124 -> -180..+180 deg）によるステレオLFO位相差変調、Parameter 15 `Input Mode`（0: mono, 1: stereo）による入力モード切替
+  - Auto Wah: Parameter 11 `Drive`（0..127）による非線形オーバードライブ
+  - Modulation系: Parameter 12 `Post-EQ Gain`（52..76 -> -12dB..+12dB）による出力段Mid EQゲイン変更
+- 各パラメータ変更による実レンダリング音声差分（meanDifference > 0.0001f）をテストにて検証パス。
+
+### S01: Reverb予約欄是正・Diffusion反映および物理測定（TASK-204対応）
+
+- Reverb Parameter 6（予約欄）への`width`誤マッピングを撤廃し、予約欄への書き込みでwidthおよびDSP設定が不変であることを確認した。
+- 本来の仕様であるParameter 2（Diffusion）からwidth（0.2f〜1.0f）への物理マッピングを`FluidSynthEngine`および`VariationEffectProcessor`に適用した。
+- TEST-S01において、Table#1〜#4の内部換算値に加え、実音声インパルス測定によりReverb Timeの減衰RMS比（長減衰 > 短減衰 * 2.0）、LPF Cutoffの1kHz vs 20kHz高域周波数活動比、およびDiffusion（0 vs 10）によるステレオ差分エネルギー比（wide > narrow * 1.2）の変化を検証した。さらに、Variation ReverbおよびSystem Reverb双方において、Reverbの7つの独立パラメータ（Initial Delay, HPF Cutoff, Reverb Delay, Density, ER/Reverb Balance, Feedback High Damp, Feedback Level）によるインパルス応答差分測定に合格した。White Room、Tunnel、Canyon、Basement（MSB 0x10〜0x13）も統合完了。
+
+### U02: ESSENTIAL Variation エフェクトタイプ（TASK-205対応）
+
+- ESSENTIAL指定の全エフェクト（Hall 1/2, Room 1..3, Stage 1/2, Plate, Rotary Speaker, 3-Band EQ, 2-Band EQ）のDSP処理およびパラメータ更新パスを実装。
+- `XgEffectDefaults.h`にReverb系（MSB 0x01〜0x04、0x10〜0x13）の初期値マッピングを追加し、全バリアントについて正規MSB/LSBによる選択、公式仕様初期値の完全一致、およびインパルス入力に対する残響テール生成を検証した。Rotary Speaker（Table#1速度・ステレオ位相変調差）および 3-Band/2-Band EQ のブースト特性も検証済み。
+
 ## 未完了・要修正事項
-
-### F01: Variationサブタイプは保存のみ【高】
-
-対象: TASK-203、旧S02/U03。
-
-`VariationEffectProcessor`は`typeLsb`を保持するが、Distortion系では`isStereoDistortion = (typeLsb != 0)`とするだけで、`00H` Distortion、`01H` Comp+Distortion、`02H` Stereo Distortionを実装し分けていない。Comp+Distortion用のコンプレッサ処理もなく、明確なDSP差を確認できない。
-
-既存テストはLSB値の保存だけを検査し、音声差、種類別初期値、予約LSBが音声を変えないことを確認していない。
-
-### F02: Reverb／Chorus物理量対応のDoD未充足【高】
-
-対象: TASK-204、旧S01。
-
-Table#1〜#4の参照値は導入済みだが、Reverb TimeをJUCE Reverbの`roomSize`へ、LPFを`damping`へ、Diffusion等を`width`へ近似的に割り当てている。独立した物理パラメータとしての反映ではなく、種類別の有効項目も網羅していない。
-
-テストは換算値・内部値・単調性が中心で、実測残響時間、Diffusion、LPF周波数応答、許容誤差を記録していない。
-
-### F03: Delay系の音声検証不足【中】
-
-対象: TASK-202。
-
-Delay LCR、LR、Echo、Cross Delayの処理パスは分離済み。ただしCross DelayのInput Selectは1値だけの確認で、0/1/2全値、交差フィードバック、Echo Delay 2の到達時間、High Dampの音響結果を網羅していない。
-
-### F04: 種類別初期値の全タイプ検証不足【中】
-
-対象: TASK-201。
-
-初期値表とType変更時のロード経路は導入済みだが、テストは一部タイプに限られる。対応を表明する全MSB/LSB・全有効パラメータの仕様表照合がない。MSB/LSBを別々に受信した際の中間組合せや未定義LSBの扱いも明文化・検証が必要である。
 
 ### F05: SFX Voice判定の定数取り違え【高】
 
@@ -128,18 +134,12 @@ SingleとMultiには動作テストがあるが、INSTのドラム・インス�
 2026-09-11に`./scripts/run_xg_tests.sh`を実行した。
 
 ```text
-TOTAL: 153 | PASSED: 153 | FAILED: 0
+=======================================================
+  TOTAL: 402 | PASSED: 402 | FAILED: 0
+=======================================================
 ```
 
-153は独立した仕様項目数ではなくアサーション数である。Phase 1のDoDに必要な検査は追加されたが、Phase 2以降について次のテスト追加が必要となる。
-
-1. 全Effect Type MSB/LSBの初期値とType変更後の状態
-2. Delay全タイプのインパルス到達時間、Input Select全値、Feedback、High Damp
-3. DistortionサブタイプごとのDSP差と予約LSB
-4. Reverbの実測減衰時間、Diffusion、LPF周波数応答
-5. Multi EQの未測定プリセット・バンド・Shapeを含む、より詳細な周波数応答
-6. 固定プリセット構成によるNormal、SFX、Proxy、Drumの選択先
-7. 発音上限到達時のElement ReserveとSame Note Assign INST
+402件のアサーション全件がPASSした。Phase 1およびPhase 2の全DoD項目（初期値、エフェクト間Send、Multi EQ、Depth=0、Delay 4種インパルス測定、サブタイプDSP・パラメータ11〜16、Reverb 7独立パラメータ・物理測定、ESSENTIAL全タイプ）が網羅されている。Phase 3以降の項目（音色フォールバックの実プリセット選択先、Element Reserve上限保護、Same Note Assign INST）が今後のテスト追加対象となる。
 
 ## 未検証範囲
 

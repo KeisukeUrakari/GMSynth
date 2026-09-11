@@ -179,6 +179,14 @@ void FluidSynthEngine::prepare (double sampleRate, int samplesPerBlock)
     chorusProcessor.prepare (spec);
     variationProcessor.prepare (safeSr, safeBlock);
 
+    systemReverbInitialDelayBuffer[0].resize (maxSystemReverbDelayBufferSize, 0.0f);
+    systemReverbInitialDelayBuffer[1].resize (maxSystemReverbDelayBufferSize, 0.0f);
+    systemReverbPostDelayBuffer[0].resize (maxSystemReverbDelayBufferSize, 0.0f);
+    systemReverbPostDelayBuffer[1].resize (maxSystemReverbDelayBufferSize, 0.0f);
+    systemReverbErBuffer.setSize (2, safeBlock, false, false, true);
+    systemReverbLateInputBuffer.setSize (2, safeBlock, false, false, true);
+    resetSystemReverbDsp();
+
     updateReverbSettings();
     updateChorusSettings();
     variationProcessor.updateParameters (variationParameters);
@@ -964,9 +972,11 @@ void FluidSynthEngine::updateReverbSettings() noexcept
         p.dryLevel = 0.0f;
         p.roomSize = 0.0f;
         p.damping = 0.0f;
+        p.width = 0.0f;
         reverbProcessor.setParameters (p);
         appliedReverbRoomSize = 0.0f;
         appliedReverbDamping = 0.0f;
+        appliedReverbWidth = 0.0f;
         return;
     }
 
@@ -976,18 +986,17 @@ void FluidSynthEngine::updateReverbSettings() noexcept
     const float norm = std::log (juce::jmax (0.3f, revTimeSec) / 0.3f) / std::log (30.0f / 0.3f);
     const float roomSize = juce::jlimit (0.05f, 0.98f, 0.10f + 0.88f * std::pow (norm, 0.75f));
 
+    // Param 2: Diffusion (0..10) -> maps to stereo width [0.2, 1.0]
+    // Note: Reverb Parameters 6..9 and 16 are reserved in XG specification for Hall/Room/Stage/Plate
+    // and must NOT alter the DSP width or any other internal parameter.
+    const auto diffVal = static_cast<float> (juce::jlimit (0, 10, static_cast<int> (reverbParameters.parameters[1])));
+    const float width = juce::jlimit (0.2f, 1.0f, 0.2f + (diffVal / 10.0f) * 0.8f);
+
     // Param 5: LPF Cutoff Frequency (Table#3: 1.0kHz .. 20.0kHz)
     const float lpfCutoffHz = xg::tables::lookupEqFrequency (reverbParameters.parameters[4]);
     // Freeverb damping: 0.0 = bright (high cutoff / 20kHz), 1.0 = dark (low cutoff / 1kHz)
     const float dampNorm = 1.0f - (std::log10 (juce::jlimit (1000.0f, 20000.0f, lpfCutoffHz) / 1000.0f) / std::log10 (20.0f));
     const float damping = juce::jlimit (0.0f, 1.0f, dampNorm);
-
-    // Param 6: Width / Diffusion (0..127)
-    float width = 1.0f;
-    if (reverbParameters.parameters[5] > 0)
-        width = juce::jlimit (0.0f, 1.0f, static_cast<float> (reverbParameters.parameters[5]) / 64.0f);
-    else if (reverbParameters.parameters[1] > 0) // Diffusion
-        width = juce::jlimit (0.2f, 1.0f, static_cast<float> (reverbParameters.parameters[1]) / 10.0f);
 
     juce::dsp::Reverb::Parameters params;
     params.roomSize = roomSize;
@@ -1000,6 +1009,181 @@ void FluidSynthEngine::updateReverbSettings() noexcept
     reverbProcessor.setParameters (params);
     appliedReverbRoomSize = roomSize;
     appliedReverbDamping = damping;
+    appliedReverbWidth = width;
+
+    const auto sr = currentSampleRate.load (std::memory_order_relaxed);
+    const float safeSr = static_cast<float> (sr > 0.0 ? sr : 44100.0);
+
+    // Param 3: Initial Delay (0..63 -> Table#5: 0.1ms..99.3ms)
+    const float initDelayMs = xg::tables::lookupDelayTime200 (reverbParameters.parameters[2] & 0x7F);
+    systemReverbInitialDelaySamples = juce::jlimit (1.0f, static_cast<float> (maxSystemReverbDelayBufferSize - 100),
+                                                    initDelayMs * 0.001f * safeSr);
+
+    // Param 4: HPF Cutoff Frequency (0..52 -> Table#3: 20Hz..8.0kHz, 0=Thru)
+    const int hpfIdx = static_cast<int> (reverbParameters.parameters[3] & 0x7F);
+    if (hpfIdx > 0 && hpfIdx <= 52)
+    {
+        const float hpfFreq = xg::tables::lookupEqFrequency (hpfIdx);
+        const auto coeffs = juce::IIRCoefficients::makeHighPass (safeSr, juce::jlimit (20.0, safeSr * 0.49, static_cast<double> (hpfFreq)));
+        for (auto& f : systemReverbHpfFilters)
+            f.setCoefficients (coeffs);
+        systemReverbHpfActive = true;
+    }
+    else
+    {
+        systemReverbHpfActive = false;
+    }
+
+    // Param 14: Feedback High Damp (1..10 -> 0.1 .. 1.0, default 8)
+    const int highDampIdx = juce::jlimit (1, 10, static_cast<int> (reverbParameters.parameters[13] > 0 ? (reverbParameters.parameters[13] & 0x7F) : 8));
+    systemReverbFbHighDampCoeff = static_cast<float> (highDampIdx) / 10.0f;
+
+    // Param 11: Reverb Delay (0..63 -> Table#5: 0.1ms..99.3ms)
+    const float revDelayMs = xg::tables::lookupDelayTime200 (reverbParameters.parameters[10] & 0x7F);
+    systemReverbPostDelaySamples = juce::jlimit (1.0f, static_cast<float> (maxSystemReverbDelayBufferSize - 100),
+                                                 revDelayMs * 0.001f * safeSr);
+
+    // Param 12: Density (0..4, default 4)
+    systemReverbDensity = juce::jlimit (0, 4, static_cast<int> (reverbParameters.parameters[11] & 0x7F));
+
+    // Param 13: ER/Reverb Balance (1..127, 0=ER only, 64=1:1, default 50/64)
+    const int erRevBal = static_cast<int> (reverbParameters.parameters[12] & 0x7F);
+    if (erRevBal == 0)
+    {
+        systemReverbErGain = 1.0f;
+        systemReverbLateGain = 0.0f;
+    }
+    else if (erRevBal <= 64)
+    {
+        systemReverbErGain = 1.0f;
+        systemReverbLateGain = static_cast<float> (erRevBal) / 64.0f;
+    }
+    else
+    {
+        systemReverbErGain = static_cast<float> (127 - erRevBal) / 63.0f;
+        systemReverbLateGain = 1.0f;
+    }
+
+    // Param 15: Feedback Level (1..127, 64=0, default 64)
+    const int fbData = juce::jlimit (1, 127, static_cast<int> (reverbParameters.parameters[14] > 0 ? (reverbParameters.parameters[14] & 0x7F) : 64));
+    systemReverbFeedbackLevel = (static_cast<float> (fbData) - 64.0f) / 63.0f * 0.7f;
+}
+
+void FluidSynthEngine::resetSystemReverbDsp() noexcept
+{
+    for (auto& buf : systemReverbInitialDelayBuffer)
+        std::fill (buf.begin(), buf.end(), 0.0f);
+    for (auto& buf : systemReverbPostDelayBuffer)
+        std::fill (buf.begin(), buf.end(), 0.0f);
+    systemReverbInitialDelayWritePos = 0;
+    systemReverbPostDelayWritePos = 0;
+    systemReverbFbHighDampState = { 0.0f, 0.0f };
+    systemReverbHpfFilters[0].reset();
+    systemReverbHpfFilters[1].reset();
+    systemReverbErBuffer.clear();
+    systemReverbLateInputBuffer.clear();
+}
+
+void FluidSynthEngine::processSystemReverb (juce::AudioBuffer<float>& buffer, int numSamples) noexcept
+{
+    if (reverbParameters.typeMsb == 0x00)
+    {
+        buffer.clear (0, numSamples);
+        return;
+    }
+
+    auto* sigL = buffer.getWritePointer (0);
+    auto* sigR = buffer.getWritePointer (1);
+
+    // 1. HPF Cutoff Frequency (Param 4)
+    if (systemReverbHpfActive)
+    {
+        systemReverbHpfFilters[0].processSamples (sigL, numSamples);
+        systemReverbHpfFilters[1].processSamples (sigR, numSamples);
+    }
+
+    if (systemReverbErBuffer.getNumSamples() < numSamples)
+    {
+        systemReverbErBuffer.setSize (2, numSamples, false, false, true);
+        systemReverbLateInputBuffer.setSize (2, numSamples, false, false, true);
+    }
+
+    systemReverbErBuffer.clear();
+    systemReverbLateInputBuffer.clear();
+
+    auto* erL = systemReverbErBuffer.getWritePointer (0);
+    auto* erR = systemReverbErBuffer.getWritePointer (1);
+    auto* lateInL = systemReverbLateInputBuffer.getWritePointer (0);
+    auto* lateInR = systemReverbLateInputBuffer.getWritePointer (1);
+
+    auto* initBufL = systemReverbInitialDelayBuffer[0].data();
+    auto* initBufR = systemReverbInitialDelayBuffer[1].data();
+    auto* revBufL = systemReverbPostDelayBuffer[0].data();
+    auto* revBufR = systemReverbPostDelayBuffer[1].data();
+
+    const auto sr = currentSampleRate.load (std::memory_order_relaxed);
+    const float safeSr = static_cast<float> (sr > 0.0 ? sr : 44100.0);
+    const float dtSamples = safeSr * 0.001f;
+    const float densityScale = static_cast<float> (systemReverbDensity) / 4.0f;
+
+    auto interpolateReverbDelay = [] (const float* buf, float readPos) noexcept -> float
+    {
+        while (readPos < 0.0f)
+            readPos += static_cast<float> (maxSystemReverbDelayBufferSize);
+        const auto idx0 = static_cast<int> (readPos) % maxSystemReverbDelayBufferSize;
+        const auto idx1 = (idx0 + 1) % maxSystemReverbDelayBufferSize;
+        const auto frac = readPos - static_cast<float> (static_cast<int> (readPos));
+        return (1.0f - frac) * buf[idx0] + frac * buf[idx1];
+    };
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        // Read Initial Delay
+        const float delayedInitL = interpolateReverbDelay (initBufL, static_cast<float> (systemReverbInitialDelayWritePos) - systemReverbInitialDelaySamples);
+        const float delayedInitR = interpolateReverbDelay (initBufR, static_cast<float> (systemReverbInitialDelayWritePos) - systemReverbInitialDelaySamples);
+
+        // Feedback loop with High Damp
+        systemReverbFbHighDampState[0] += (1.0f - systemReverbFbHighDampCoeff) * (delayedInitL - systemReverbFbHighDampState[0]);
+        systemReverbFbHighDampState[1] += (1.0f - systemReverbFbHighDampCoeff) * (delayedInitR - systemReverbFbHighDampState[1]);
+
+        initBufL[systemReverbInitialDelayWritePos] = sigL[i] + systemReverbFbHighDampState[0] * systemReverbFeedbackLevel;
+        initBufR[systemReverbInitialDelayWritePos] = sigR[i] + systemReverbFbHighDampState[1] * systemReverbFeedbackLevel;
+
+        // Early reflections from initial delay buffer
+        const float erTapL1 = interpolateReverbDelay (initBufL, static_cast<float> (systemReverbInitialDelayWritePos) - systemReverbInitialDelaySamples - 7.3f * dtSamples);
+        const float erTapL2 = interpolateReverbDelay (initBufR, static_cast<float> (systemReverbInitialDelayWritePos) - systemReverbInitialDelaySamples - 22.1f * dtSamples);
+        const float erTapR1 = interpolateReverbDelay (initBufR, static_cast<float> (systemReverbInitialDelayWritePos) - systemReverbInitialDelaySamples - 11.8f * dtSamples);
+        const float erTapR2 = interpolateReverbDelay (initBufL, static_cast<float> (systemReverbInitialDelayWritePos) - systemReverbInitialDelaySamples - 29.5f * dtSamples);
+
+        erL[i] = delayedInitL * 0.6f + (erTapL1 * 0.5f + erTapL2 * 0.35f) * densityScale * systemReverbFbHighDampCoeff;
+        erR[i] = delayedInitR * 0.6f + (erTapR1 * 0.5f + erTapR2 * 0.35f) * densityScale * systemReverbFbHighDampCoeff;
+
+        // Feed to Reverb Post Delay buffer
+        revBufL[systemReverbPostDelayWritePos] = delayedInitL;
+        revBufR[systemReverbPostDelayWritePos] = delayedInitR;
+
+        // Read Reverb Post Delay output for Late Reverb
+        lateInL[i] = interpolateReverbDelay (revBufL, static_cast<float> (systemReverbPostDelayWritePos) - systemReverbPostDelaySamples);
+        lateInR[i] = interpolateReverbDelay (revBufR, static_cast<float> (systemReverbPostDelayWritePos) - systemReverbPostDelaySamples);
+
+        systemReverbInitialDelayWritePos = (systemReverbInitialDelayWritePos + 1) % maxSystemReverbDelayBufferSize;
+        systemReverbPostDelayWritePos = (systemReverbPostDelayWritePos + 1) % maxSystemReverbDelayBufferSize;
+    }
+
+    // Process Late Reverb
+    juce::dsp::AudioBlock<float> block (systemReverbLateInputBuffer.getArrayOfWritePointers(), 2, 0, static_cast<size_t> (numSamples));
+    juce::dsp::ProcessContextReplacing<float> context (block);
+    reverbProcessor.process (context);
+
+    auto* lateOutL = systemReverbLateInputBuffer.getWritePointer (0);
+    auto* lateOutR = systemReverbLateInputBuffer.getWritePointer (1);
+
+    // Combine ER and Late Reverb
+    for (int i = 0; i < numSamples; ++i)
+    {
+        sigL[i] = erL[i] * systemReverbErGain + lateOutL[i] * systemReverbLateGain;
+        sigR[i] = erR[i] * systemReverbErGain + lateOutR[i] * systemReverbLateGain;
+    }
 }
 
 void FluidSynthEngine::updateGsReverbSettings() noexcept
@@ -1700,6 +1884,7 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
             drumSetup1.reset();
             drumSetup2.reset();
             reverbParameters.reset();
+            resetSystemReverbDsp();
             chorusParameters.reset();
             variationParameters.reset();
             variationProcessor.reset();
@@ -4759,10 +4944,17 @@ void FluidSynthEngine::renderSubRange (int totalSamples, float* destLeft, float*
             }
         }
 
-        juce::dsp::AudioBlock<float> reverbBlock (reverbBusBuffer);
-        auto subReverbBlock = reverbBlock.getSubBlock (0, static_cast<size_t> (chunkSize));
-        juce::dsp::ProcessContextReplacing<float> reverbContext (subReverbBlock);
-        reverbProcessor.process (reverbContext);
+        if (isXg)
+        {
+            processSystemReverb (reverbBusBuffer, chunkSize);
+        }
+        else
+        {
+            juce::dsp::AudioBlock<float> reverbBlock (reverbBusBuffer);
+            auto subReverbBlock = reverbBlock.getSubBlock (0, static_cast<size_t> (chunkSize));
+            juce::dsp::ProcessContextReplacing<float> reverbContext (subReverbBlock);
+            reverbProcessor.process (reverbContext);
+        }
 
         // 5. Master Summing
         juce::FloatVectorOperations::clear (curDestLeft, chunkSize);
@@ -5152,10 +5344,17 @@ void FluidSynthEngine::renderBlockWithInjectedPartForTest (juce::AudioBuffer<flo
 
         if (! effectBypassForTest)
         {
-            juce::dsp::AudioBlock<float> reverbBlock (reverbBusBuffer);
-            auto subReverbBlock = reverbBlock.getSubBlock (0, static_cast<size_t> (chunkSize));
-            juce::dsp::ProcessContextReplacing<float> reverbContext (subReverbBlock);
-            reverbProcessor.process (reverbContext);
+            if (isXg)
+            {
+                processSystemReverb (reverbBusBuffer, chunkSize);
+            }
+            else
+            {
+                juce::dsp::AudioBlock<float> reverbBlock (reverbBusBuffer);
+                auto subReverbBlock = reverbBlock.getSubBlock (0, static_cast<size_t> (chunkSize));
+                juce::dsp::ProcessContextReplacing<float> reverbContext (subReverbBlock);
+                reverbProcessor.process (reverbContext);
+            }
         }
 
         // 5. Master Summing

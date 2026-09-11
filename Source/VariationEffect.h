@@ -21,12 +21,14 @@ public:
                   int numSamples) noexcept;
 
     enum class DistortionType { Overdrive, Distortion, AmpSim };
+    enum class DistortionSubtype { Standard, CompDist, StereoDist };
     enum class DelayType { LCR, LR, Echo, Cross };
 
     uint8_t getCurrentTypeMsb() const noexcept { return currentTypeMsb; }
     uint8_t getCurrentTypeLsb() const noexcept { return currentTypeLsb; }
 
     DistortionType getDistortionTypeForTest() const noexcept { return distType; }
+    DistortionSubtype getDistortionSubtypeForTest() const noexcept { return distSubtype; }
     bool getIsAutoPanForTest() const noexcept { return isAutoPan; }
     float getModDepthForTest() const noexcept { return modDepth; }
 
@@ -39,6 +41,18 @@ public:
     float getFeedbackDelayLSamplesForTest() const noexcept { return delayFeedbackDelayLSamples; }
     float getRotarySpeedHzForTest() const noexcept { return rotarySpeedHz; }
     bool isPostEqActiveForTest() const noexcept { return postEqActive; }
+    float getCompThresholdForTest() const noexcept { return compThreshold; }
+    float getCompRatioForTest() const noexcept { return compRatio; }
+    float getCompAttackMsForTest() const noexcept { return compAttackMs; }
+    float getCompReleaseMsForTest() const noexcept { return compReleaseMs; }
+    float getReverbInitialDelaySamplesForTest() const noexcept { return reverbInitialDelaySamples; }
+    float getReverbPostDelaySamplesForTest() const noexcept { return reverbPostDelaySamples; }
+    int getReverbDensityForTest() const noexcept { return reverbDensity; }
+    float getReverbErGainForTest() const noexcept { return reverbErGain; }
+    float getReverbLateGainForTest() const noexcept { return reverbLateGain; }
+    float getReverbHighDampForTest() const noexcept { return reverbFbHighDampCoeff; }
+    float getReverbFeedbackLevelForTest() const noexcept { return reverbFeedbackLevel; }
+    bool isReverbHpfActiveForTest() const noexcept { return reverbHpfActive; }
 
 private:
     double sampleRate = 44100.0;
@@ -74,6 +88,23 @@ private:
 
     // --- Variation Reverb (Hall 1/2, Room 1/2/3, Stage 1/2, Plate) ---
     juce::dsp::Reverb variationReverbProcessor;
+    static constexpr int maxReverbDelayBufferSize = 16384;
+    std::array<std::vector<float>, 2> reverbInitialDelayBuffer;
+    std::array<std::vector<float>, 2> reverbPostDelayBuffer;
+    int reverbInitialDelayWritePos = 0;
+    int reverbPostDelayWritePos = 0;
+    float reverbInitialDelaySamples = 1.0f;
+    float reverbPostDelaySamples = 1.0f;
+    float reverbErGain = 1.0f;
+    float reverbLateGain = 1.0f;
+    int reverbDensity = 4;
+    float reverbFeedbackLevel = 0.0f;
+    float reverbFbHighDampCoeff = 0.8f;
+    std::array<float, 2> reverbFbHighDampState { 0.0f, 0.0f };
+    std::array<juce::IIRFilter, 2> reverbHpfFilters;
+    bool reverbHpfActive = false;
+    juce::AudioBuffer<float> reverbErBuffer;
+    juce::AudioBuffer<float> reverbLateInputBuffer;
 
     // --- Rotary Speaker DSP ---
     static constexpr int maxRotaryDelaySamples = 2048;
@@ -98,8 +129,19 @@ private:
     // --- Distortion / Overdrive / Amp Sim DSP ---
     float distortionDrive = 1.0f;
     float distortionOutputGain = 1.0f;
+    float distortionEdge = 0.8f;
     DistortionType distType = DistortionType::Overdrive;
+    DistortionSubtype distSubtype = DistortionSubtype::Standard;
     bool isStereoDistortion = false;
+
+    // Compressor parameters for Comp+Distortion
+    float compAttackMs = 7.0f;
+    float compReleaseMs = 25.0f;
+    float compThreshold = 0.04467f; // -27dB default
+    float compRatio = 5.0f;
+    float compAttackCoeff = 0.0f;
+    float compReleaseCoeff = 0.0f;
+    std::array<float, 2> compEnvelope { 0.0f, 0.0f };
 
     std::array<juce::IIRFilter, 2> distPreFilters;
     std::array<juce::IIRFilter, 2> distPostFilters;
@@ -117,15 +159,24 @@ private:
     float flangerFeedback = 0.0f;
 
     // --- Phaser DSP ---
-    juce::dsp::Phaser<float> phaserProcessor;
-    float basePhaserDepth = 0.5f;
-    float basePhaserFeedback = 0.0f;
+    float phaserPhase = 0.0f;
+    float phaserRateHz = 0.34f;
+    float phaserDepth = 0.5f;
+    float phaserFeedback = 0.0f;
+    float phaserOffset = 74.0f;
+    int phaserStages = 6;
+    bool phaserDiffusionMono = false;
+    float phaserLfoPhaseDiff = 0.0f;
+    std::array<std::array<float, 12>, 2> phaserFilterState {};
+    std::array<float, 2> phaserLastOutput { 0.0f, 0.0f };
 
     // --- Tremolo / Auto Pan DSP ---
     float modPhase = 0.0f;
     float modRateHz = 1.0f;
     float modDepth = 0.5f;
     bool isAutoPan = false;
+    float tremoloLfoPhaseDiff = 0.0f;
+    bool tremoloMonoInput = false;
 
     // --- Chorus DSP ---
     juce::dsp::Chorus<float> chorusProcessor;
@@ -138,6 +189,7 @@ private:
     float wahLfoDepth = 0.5f;
     float wahManualCutoff = 0.5f;
     float wahResonance = 2.5f;
+    float autoWahDrive = 0.0f;
 
     // --- Controller Modulation ---
     float mwDepth = 0.0f;

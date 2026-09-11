@@ -113,6 +113,7 @@ public:
     float getChorusProcessorDelayForTest() const noexcept { return appliedChorusDelay; }
     float getReverbProcessorRoomSizeForTest() const noexcept { return appliedReverbRoomSize; }
     float getReverbProcessorDampingForTest() const noexcept { return appliedReverbDamping; }
+    float getReverbProcessorWidthForTest() const noexcept { return appliedReverbWidth; }
     static float testConvertEffectSendLevel (uint8_t sendVal) noexcept;
     void handleSysExForTest (const juce::uint8* data, int numBytes) noexcept
     {
@@ -305,6 +306,8 @@ private:
     void updateChannelTuning (int channel) noexcept;
     void updateAllChannelTunings() noexcept;
     void updateReverbSettings() noexcept;
+    void resetSystemReverbDsp() noexcept;
+    void processSystemReverb (juce::AudioBuffer<float>& buffer, int numSamples) noexcept;
     void updateChorusSettings() noexcept;
     void updateGsReverbSettings() noexcept;
     void updateGsChorusSettings() noexcept;
@@ -421,6 +424,27 @@ private:
     juce::dsp::Reverb reverbProcessor;
     float appliedReverbRoomSize = 0.0f;
     float appliedReverbDamping = 0.0f;
+    float appliedReverbWidth = 1.0f;
+
+    // System Reverb DSP parameters & buffers (XG)
+    static constexpr int maxSystemReverbDelayBufferSize = 16384;
+    std::array<std::vector<float>, 2> systemReverbInitialDelayBuffer;
+    std::array<std::vector<float>, 2> systemReverbPostDelayBuffer;
+    int systemReverbInitialDelayWritePos = 0;
+    int systemReverbPostDelayWritePos = 0;
+    float systemReverbInitialDelaySamples = 0.0f;
+    float systemReverbPostDelaySamples = 0.0f;
+    int systemReverbDensity = 3;
+    float systemReverbErGain = 0.5f;
+    float systemReverbLateGain = 0.5f;
+    float systemReverbFeedbackLevel = 0.0f;
+    float systemReverbFbHighDampCoeff = 1.0f;
+    std::array<float, 2> systemReverbFbHighDampState { 0.0f, 0.0f };
+    std::array<juce::IIRFilter, 2> systemReverbHpfFilters;
+    bool systemReverbHpfActive = false;
+    juce::AudioBuffer<float> systemReverbErBuffer;
+    juce::AudioBuffer<float> systemReverbLateInputBuffer;
+
     juce::dsp::Chorus<float> chorusProcessor;
     float appliedChorusDepth = 0.0f;
     float appliedChorusRate = 0.0f;

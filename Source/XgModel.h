@@ -408,6 +408,10 @@ namespace xg
     constexpr uint8_t varTypeDelayLR      = 0x06;
     constexpr uint8_t varTypeEcho         = 0x07;
     constexpr uint8_t varTypeCrossDelay   = 0x08;
+    constexpr uint8_t varTypeWhiteRoom    = 0x10;
+    constexpr uint8_t varTypeTunnel       = 0x11;
+    constexpr uint8_t varTypeCanyon       = 0x12;
+    constexpr uint8_t varTypeBasement     = 0x13;
     constexpr uint8_t varTypeChorus       = 0x41;
     constexpr uint8_t varTypeFlanger      = 0x43;
     constexpr uint8_t varTypeSymphonic    = 0x44;

@@ -140,6 +140,21 @@ namespace xg
 
             switch (msb)
             {
+                case 0x01: // HALL (same as Reverb block)
+                case 0x02: // ROOM
+                case 0x03: // STAGE
+                case 0x04: // PLATE
+                case 0x10: // WHITE ROOM
+                case 0x11: // TUNNEL
+                case 0x12: // CANYON
+                case 0x13: // BASEMENT
+                {
+                    const auto r = getReverbDefaults (msb, lsb);
+                    for (size_t i = 0; i < 10; ++i) defs.params14Bit[i] = r[i];
+                    for (size_t i = 0; i < 6; ++i)  defs.params11To16[i] = r[10 + i];
+                    break;
+                }
+
                 case 0x05: // DELAY L,C,R
                     defs.params14Bit = {{ 3333, 1667, 5000, 5000, 74, 100, 10, 0, 0, 32 }};
                     defs.params11To16 = {{ 0, 60, 28, 64, 46, 64 }};
@@ -226,7 +241,7 @@ namespace xg
                         defs.params14Bit = {{ 40, 20, 72, 53, 48, 0, 43, 74, 10, 127 }};
                         defs.params11To16 = {{ 120, 6, 2, 100, 4, 0 }};
                     }
-                    else if (lsb == 0x02) // STEREO DISTORTION
+                    else if (lsb == 0x08) // STEREO DISTORTION
                     {
                         defs.params14Bit = {{ 18, 27, 71, 48, 84, 0, 32, 66, 10, 127 }};
                         defs.params11To16 = {{ 105, 0, 0, 0, 0, 0 }};
@@ -239,7 +254,7 @@ namespace xg
                     break;
 
                 case 0x4A: // OVER DRIVE
-                    if (lsb == 0x01) // STEREO OVER DRIVE
+                    if (lsb == 0x08) // STEREO OVER DRIVE
                     {
                         defs.params14Bit = {{ 10, 24, 69, 46, 105, 0, 41, 66, 10, 127 }};
                         defs.params11To16 = {{ 104, 0, 0, 0, 0, 0 }};
@@ -252,7 +267,7 @@ namespace xg
                     break;
 
                 case 0x4B: // AMP SIMULATOR
-                    if (lsb == 0x01) // STEREO AMP SIMULATOR
+                    if (lsb == 0x08) // STEREO AMP SIMULATOR
                     {
                         defs.params14Bit = {{ 16, 2, 46, 119, 0, 0, 0, 0, 0, 127 }};
                         defs.params11To16 = {{ 106, 0, 0, 0, 0, 0 }};
