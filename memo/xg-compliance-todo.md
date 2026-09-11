@@ -25,11 +25,11 @@
 
 ## 進捗サマリー
 
-- [-] **Phase 1: 致命的・高優先度の誤り修正（定数・初期値・Send換算）** （主要実装完了、実音・全プリセット応答のDoD検証が一部未完了）
+- [x] **Phase 1: 致命的・高優先度の誤り修正（定数・初期値・Send換算）** （全タスク完了）
 - [-] **Phase 2: エフェクトパラメータ体系・初期化とDSP処理の刷新** （TASK-201〜204を再オープン）
 - [-] **Phase 3: 音色フォールバックとパート受信制御の適正化** （TASK-301〜302を再オープン）
 - [ ] **Phase 4: オプション機能・拡張仕様の整備**
-- [-] **Phase 5: 動作検証・テスト環境の整備** （回帰テスト107アサーションはPASS、DoD網羅は未完了）
+- [-] **Phase 5: 動作検証・テスト環境の整備** （回帰テスト153アサーションはPASS、Phase 1のDoDは網羅済み、Phase 2以降は未完了）
 
 ---
 
@@ -58,23 +58,23 @@
 - **完了条件（DoD）**: 10種類について正規のType入力から期待するDSPが選択され、内部の直接数値比較も新番号と一致する。例のDistortion（49H）がAmp Simulatorに入らないことを確認する。
 - **対応状況**: **完了**。`Source/XgModel.h` の全10種類MSB定数を規格値に修正し、`Source/VariationEffect.cpp` の直書き数値を定数参照に置き換え。TEST-E01にて検証済み。
 
-### [-] TASK-102: エフェクト間Sendのレベル換算式の修正 【E05】
+### [x] TASK-102: エフェクト間Sendのレベル換算式の修正 【E05】
 - **対象**: `Source/FluidSynthEngine.cpp`: 音声処理内の `varToChorus`, `chorusToReverb`, `varToReverb`
 - **仕様書**: [xgparameterchangetable.pdf](../specific/xgparameterchangetable.pdf) p.41〜42
 - **内容**:
   - 実装は `値 / 127.0f`（64で約−6dB, 127で0dB）となっているが、XG規格では「値64で 0dB、127で +6dB（約2.0倍ゲイン）」である。
   - パートからのセンド（0..127）とは区別し、エフェクト間センド用の換算を、0=無音、64=0dB、127=約+6dBに修正する。中間値のカーブは参照仕様の根拠を確認し、仕様に明示されない近似を採用する場合は式と許容誤差を記録する。
 - **完了条件（DoD）**: 3つのエフェクト間経路で、入力値0の送出がゼロ、64のゲインが1、127が約+6dBとなることを測定する。中間値の式と許容誤差を記録し、パートSendの換算を変更していないことも確認する。
-- **対応状況**: **実装済み・測定未完了**。折れ線リニアゲイン補間（val=0で0.0f、1〜64で `val / 64.0f`、65〜127で最大約1.9953f）を3つのエフェクト間Sendへ適用し、パートSendは維持した。TEST-E05は換算関数だけを確認しており、3つの実音声経路の出力ゲインとパートSend非変更を測定していないためDoD未達。
+- **対応状況**: **完了**。折れ線リニアゲイン補間（val=0で0.0f、1〜64で `val / 64.0f`、65〜127で最大約1.9953f）を3つのエフェクト間Sendへ適用。TEST-E05にて、エフェクトバイパス・実音声レンダリングを通じ、3つのエフェクト間経路（Var->Chorus, Chorus->Reverb, Var->Reverb）でSend 0の送出ゼロ、Send 64のゲイン1.0f（0dB）、Send 127の約+6dB（約1.9953倍）の出力振幅測定を実施・パス。パートSend（Part Reverb Send: value/127）が維持されていることも実音測定で確認済み。
 
-### [-] TASK-103: Multi EQプリセット値および形状の修正 【E09】
+### [x] TASK-103: Multi EQプリセット値および形状の修正 【E09】
 - **対象**: `Source/XgModel.h`: `MultiEqParameters::setPreset`
 - **仕様書**: [efctparamdeflt.pdf](../specific/efctparamdeflt.pdf) p.40
 - **内容**:
   - 現状は独自のゲイン値のみを変更し、周波数・Q・フィルタ形状を変更していない。
   - 仕様書p.40に従い、Flat, Jazz, Pops, Rock, Concert などの各プリセットについて、Band 1〜5 のゲイン、周波数、Q、Shape（Shelving/Peaking）を規定値に完全一致させる。
 - **完了条件（DoD）**: 全5プリセットの有効なGain・Frequency・Q・Shapeが仕様表と一致する。個別設定を変更してからFlat/Jazz等を選択しても以前の設定が残らず、DSPの周波数応答にも反映される。
-- **対応状況**: **実装済み・検証未完了**。5プリセットの値は仕様表に基づいて再定義済み。ただしTEST-E09は一部プリセットの一部フィールドしか比較せず、全5プリセット×全Gain/Frequency/Q/Shapeを網羅していない。DSP周波数応答も未測定のためDoD未達。
+- **対応状況**: **完了**。仕様書p.40に基づき全5プリセットの全17項目（Band 1〜5のGain/Freq/Q、Band 1/5のShape）を規定値に完全準拠。TEST-E09にて、全5プリセット×全パラメータの完全突合検証、カスタムパラメータ編集後のプリセット再選択による初期化検証、および50Hz/1kHz/8kHzサイン波による実DSP周波数応答測定（Jazzの低域・高域カット/中域ブースト、Rockの低域ブースト/中域カット）を実施しDoDを達成。
 
 ### [x] TASK-104: Multi Partのリセット値・初期値の修正 【E10】
 - **対象**:
@@ -88,7 +88,7 @@
 - **完了条件（DoD）**: XG System On後の全16パートでRcv Channelが0〜15、Part 10のPart Modeが02・Element Reserveが0、その他のElement Reserveが2となる。共通リセット経路の変更がGM/GSモードに影響しないことを確認する。
 - **対応状況**: **完了**。`PartParameters::reset(int channelIndex)` を新設し、コンストラクタおよび `resetChannelState` 両方で適用。Part 10 の初期モードを Drums1 (0x02)、Element Reserve を 0（他パートは 2）、Rcv Channel を 0〜15 に設定。TEST-E10にて検証済み。
 
-### [-] TASK-105: 有効なゼロ値（Depth等）の取り扱い修正 【E04】
+### [x] TASK-105: 有効なゼロ値（Depth等）の取り扱い修正 【E04】
 - **対象**:
   - `Source/FluidSynthEngine.cpp`: `updateChorusSettings`
   - `Source/VariationEffect.cpp`: 各パラメータ更新関数
@@ -97,7 +97,7 @@
   - `value > 0` で設定有無を判定し、0 が指定された場合に既定値へ置き換えている箇所を修正する。
   - Chorus の LFO Depth や Tremolo の Depth など、値域として 0（効果オフ／変調停止）が有効なパラメータを適切に受け付ける。
 - **完了条件（DoD）**: TASK-201の初期値適用後、有効なDepth=0で該当する変調がなくなり、非ゼロ指定で再び有効になることを音声で確認する。0が値域外の項目まで一律に有効扱いしない。
-- **対応状況**: **主要実装済み・音声検証未完了**。Chorus LFO DepthとVariation Tremolo Depthのゼロ置換を撤廃し、内部DSP値が0になることはTEST-E04で確認済み。ただしDoDが要求する実音での変調停止・復帰と、種類別に0が有効／無効な項目の網羅確認は未実施。
+- **対応状況**: **完了**。Chorus LFO DepthおよびVariation Tremolo Depthにおいて、ゼロ置換を撤廃し0（変調停止）を正常受付。TEST-E04にて、TremoloおよびChorusの実音声レンダリングにより、Depth=0で振幅/波形変調が停止（出力変動ゼロ）し、Depth=127で変調が再開することを確認。値域外のChorus Feedback=0は受信時に拒否され、直前の有効値を保持する。Reverb Time=0はTable#4で有効な最小値0.3秒として保存・変換されることも確認済み。
 
 ### [x] TASK-106: Part Mode Drums3/4 と Drum Setup 割り当ての整理 【E08】
 - **対象**: `Source/FluidSynthEngine.cpp`: Drum Setup パラメータ受信および発音時のSetup選択
@@ -246,7 +246,7 @@
   - 内部パラメータに加え、選択されるDSP・プリセット、受信ルーティング、実際の音声出力を検査する。E01では種類値の保存だけ、E02/E04/E05では内部値の更新だけを成功条件にしない。
   - テスト用SoundFont、サンプルレート、初期化手順、エフェクト接続先を固定し、インパルス応答・ゲイン測定などでDSPへの反映を確認する。
 - **完了条件（DoD）**: E01〜E10を検査ケースへ対応付け、各ケースの入力列・期待結果・実行結果を記録する。状態・プリセット選択・ルーティング・音声測定を必要に応じて組み合わせ、元の不具合を検出できる検査を各改修と同時に実行する。
-- **対応状況**: **部分完了**。`Tests/XgRegressionTests.cpp` と`scripts/run_xg_tests.sh`を作成し、2026-09-11時点で107/107アサーションがPASSした。ただし107は独立した仕様項目数ではなくアサーション数であり、TASK-201〜204、301〜302のDoDを網羅しない。全タイプ初期値、Delay全経路、LSBサブタイプDSP、Reverb実測、実プリセット選択先、Element Reserve上限試験、Same Note Assign INSTを追加する。
+- **対応状況**: **部分完了**。`Tests/XgRegressionTests.cpp` と`scripts/run_xg_tests.sh`を作成し、2026-09-11時点で153/153アサーションがPASSした。Phase 1では、全10 Variation TypeのDSP選択、3つのエフェクト間SendとPart Send、Multi EQの全プリセット値と代表周波数応答、Depth=0の変調停止・復帰、GM/GSリセット非影響までDoDを網羅した。ただし153は独立した仕様項目数ではなくアサーション数であり、TASK-201〜204、301〜302のDoDは網羅しない。全タイプ初期値、Delay全経路、LSBサブタイプDSP、Reverb実測、実プリセット選択先、Element Reserve上限試験、Same Note Assign INSTを追加する。
 
 ### [ ] TASK-502: 代表的XG SMF（MIDIファイル）による実音確認
 - **対象**: 検証用SMF、音声レンダリング結果、検証記録

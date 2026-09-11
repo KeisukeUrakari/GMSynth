@@ -2340,7 +2340,13 @@ void FluidSynthEngine::handleSysEx (const juce::uint8* data, int numBytes) noexc
             }
             else if (curAddr >= 0x22 && curAddr <= 0x2b)
             {
-                chorusParameters.parameters[static_cast<size_t> (curAddr - 0x22)] = val;
+                const auto paramIdx = static_cast<size_t> (curAddr - 0x22);
+                // Chorus Param 3 (Feedback Level): valid range is 1..127 (-63..+63, 64=0).
+                // 0 is out-of-range and rejected to preserve the prior value.
+                if (paramIdx == 2 && val == 0)
+                    continue;
+
+                chorusParameters.parameters[paramIdx] = val;
                 chorusChanged = true;
             }
             else if (curAddr == 0x2c)
@@ -4972,3 +4978,251 @@ float FluidSynthEngine::testConvertEffectSendLevel (uint8_t sendVal) noexcept
 {
     return convertEffectSendLevel (sendVal);
 }
+
+void FluidSynthEngine::renderBlockWithInjectedPartForTest (juce::AudioBuffer<float>& outBuffer,
+                                                          int part,
+                                                          const juce::AudioBuffer<float>& inSignal) noexcept
+{
+    adoptPendingChange();
+    const int numSamples = juce::jmin (outBuffer.getNumSamples(), inSignal.getNumSamples());
+    outBuffer.clear();
+
+    const auto maxChunk = multiPartBuffer.getNumSamples();
+    if (maxChunk <= 0 || numSamples <= 0)
+        return;
+
+    const auto activeMode = getActiveMode();
+    const bool isXg = (activeMode == ActiveMode::XG);
+    const bool isGs = (activeMode == ActiveMode::GS);
+    const bool varIsInsertion = isXg && (variationParameters.connection == 0);
+    const int varTargetPart = static_cast<int> (variationParameters.part);
+
+    int samplesRendered = 0;
+    while (samplesRendered < numSamples)
+    {
+        const auto chunkSize = juce::jmin (maxChunk, numSamples - samplesRendered);
+        auto* curDestLeft = outBuffer.getWritePointer (0, samplesRendered);
+        auto* curDestRight = outBuffer.getWritePointer (1, samplesRendered);
+
+        for (int ch = 0; ch < totalSynthChannels; ++ch)
+        {
+            partLeftPtrs[static_cast<size_t> (ch)] = multiPartBuffer.getWritePointer (ch * 2);
+            partRightPtrs[static_cast<size_t> (ch)] = multiPartBuffer.getWritePointer (ch * 2 + 1);
+            juce::FloatVectorOperations::clear (partLeftPtrs[static_cast<size_t> (ch)], chunkSize);
+            juce::FloatVectorOperations::clear (partRightPtrs[static_cast<size_t> (ch)], chunkSize);
+        }
+
+        if (juce::isPositiveAndBelow (part, numMidiChannels))
+        {
+            multiPartBuffer.copyFrom (part * 2, 0, inSignal, 0, samplesRendered, chunkSize);
+            multiPartBuffer.copyFrom (part * 2 + 1, 0, inSignal, 1, samplesRendered, chunkSize);
+        }
+
+        // 1. Part EQ
+        for (int ch = 0; ch < numMidiChannels; ++ch)
+        {
+            auto& eq = partEqs[static_cast<size_t> (ch)];
+            if (eq.needsUpdate)
+            {
+                updatePartEqCoefficients (ch);
+                eq.needsUpdate = false;
+            }
+
+            if (eq.bassActive)
+            {
+                eq.bassFilters[0].processSamples (partLeftPtrs[static_cast<size_t> (ch)], chunkSize);
+                eq.bassFilters[1].processSamples (partRightPtrs[static_cast<size_t> (ch)], chunkSize);
+            }
+            if (eq.trebleActive)
+            {
+                eq.trebleFilters[0].processSamples (partLeftPtrs[static_cast<size_t> (ch)], chunkSize);
+                eq.trebleFilters[1].processSamples (partRightPtrs[static_cast<size_t> (ch)], chunkSize);
+            }
+        }
+
+        // 2. Variation Effect
+        variationInputBuffer.clear (0, 0, chunkSize);
+        variationInputBuffer.clear (1, 0, chunkSize);
+        variationOutputBuffer.clear (0, 0, chunkSize);
+        variationOutputBuffer.clear (1, 0, chunkSize);
+
+        if (varIsInsertion && juce::isPositiveAndBelow (varTargetPart, numMidiChannels))
+        {
+            const auto partIdx = static_cast<size_t> (varTargetPart);
+            variationInputBuffer.copyFrom (0, 0, multiPartBuffer, static_cast<int> (partIdx * 2), 0, chunkSize);
+            variationInputBuffer.copyFrom (1, 0, multiPartBuffer, static_cast<int> (partIdx * 2 + 1), 0, chunkSize);
+
+            if (effectBypassForTest)
+            {
+                variationOutputBuffer.copyFrom (0, 0, variationInputBuffer, 0, 0, chunkSize);
+                variationOutputBuffer.copyFrom (1, 0, variationInputBuffer, 1, 0, chunkSize);
+            }
+            else
+            {
+                variationProcessor.process (variationInputBuffer, variationOutputBuffer, chunkSize);
+            }
+
+            multiPartBuffer.copyFrom (static_cast<int> (partIdx * 2), 0, variationOutputBuffer, 0, 0, chunkSize);
+            multiPartBuffer.copyFrom (static_cast<int> (partIdx * 2 + 1), 0, variationOutputBuffer, 1, 0, chunkSize);
+        }
+        else if (isXg && variationParameters.connection == 1)
+        {
+            for (int ch = 0; ch < numMidiChannels; ++ch)
+            {
+                const auto vSend = static_cast<float> (partParameters[static_cast<size_t> (ch)].variationSend) / 127.0f;
+                if (vSend > 0.0f)
+                {
+                    variationInputBuffer.addFrom (0, 0, multiPartBuffer, ch * 2, 0, chunkSize, vSend);
+                    variationInputBuffer.addFrom (1, 0, multiPartBuffer, ch * 2 + 1, 0, chunkSize, vSend);
+                }
+            }
+
+            if (effectBypassForTest)
+            {
+                variationOutputBuffer.copyFrom (0, 0, variationInputBuffer, 0, 0, chunkSize);
+                variationOutputBuffer.copyFrom (1, 0, variationInputBuffer, 1, 0, chunkSize);
+            }
+            else
+            {
+                variationProcessor.process (variationInputBuffer, variationOutputBuffer, chunkSize);
+            }
+        }
+
+        // 3. Chorus Bus
+        chorusBusBuffer.clear (0, 0, chunkSize);
+        chorusBusBuffer.clear (1, 0, chunkSize);
+
+        for (int ch = 0; ch < numMidiChannels; ++ch)
+        {
+            const auto cSend = static_cast<float> (partParameters[static_cast<size_t> (ch)].chorusSend) / 127.0f;
+            if (cSend > 0.0f)
+            {
+                chorusBusBuffer.addFrom (0, 0, multiPartBuffer, ch * 2, 0, chunkSize, cSend);
+                chorusBusBuffer.addFrom (1, 0, multiPartBuffer, ch * 2 + 1, 0, chunkSize, cSend);
+            }
+        }
+
+        if (isXg && variationParameters.connection == 1)
+        {
+            const auto varToChorus = convertEffectSendLevel (variationParameters.sendToChorus);
+            if (varToChorus > 0.0f)
+            {
+                chorusBusBuffer.addFrom (0, 0, variationOutputBuffer, 0, 0, chunkSize, varToChorus);
+                chorusBusBuffer.addFrom (1, 0, variationOutputBuffer, 1, 0, chunkSize, varToChorus);
+            }
+        }
+
+        if (! effectBypassForTest)
+        {
+            juce::dsp::AudioBlock<float> chorusBlock (chorusBusBuffer);
+            auto subChorusBlock = chorusBlock.getSubBlock (0, static_cast<size_t> (chunkSize));
+            juce::dsp::ProcessContextReplacing<float> chorusContext (subChorusBlock);
+            chorusProcessor.process (chorusContext);
+        }
+
+        // 4. Reverb Bus
+        reverbBusBuffer.clear (0, 0, chunkSize);
+        reverbBusBuffer.clear (1, 0, chunkSize);
+
+        for (int ch = 0; ch < numMidiChannels; ++ch)
+        {
+            const auto rSend = static_cast<float> (partParameters[static_cast<size_t> (ch)].reverbSend) / 127.0f;
+            if (rSend > 0.0f)
+            {
+                reverbBusBuffer.addFrom (0, 0, multiPartBuffer, ch * 2, 0, chunkSize, rSend);
+                reverbBusBuffer.addFrom (1, 0, multiPartBuffer, ch * 2 + 1, 0, chunkSize, rSend);
+            }
+        }
+
+        const auto chorusToReverb = isXg ? convertEffectSendLevel (chorusParameters.sendToReverb) : 0.0f;
+        if (chorusToReverb > 0.0f)
+        {
+            reverbBusBuffer.addFrom (0, 0, chorusBusBuffer, 0, 0, chunkSize, chorusToReverb);
+            reverbBusBuffer.addFrom (1, 0, chorusBusBuffer, 1, 0, chunkSize, chorusToReverb);
+        }
+        if (isXg && variationParameters.connection == 1)
+        {
+            const auto varToReverb = convertEffectSendLevel (variationParameters.sendToReverb);
+            if (varToReverb > 0.0f)
+            {
+                reverbBusBuffer.addFrom (0, 0, variationOutputBuffer, 0, 0, chunkSize, varToReverb);
+                reverbBusBuffer.addFrom (1, 0, variationOutputBuffer, 1, 0, chunkSize, varToReverb);
+            }
+        }
+
+        if (! effectBypassForTest)
+        {
+            juce::dsp::AudioBlock<float> reverbBlock (reverbBusBuffer);
+            auto subReverbBlock = reverbBlock.getSubBlock (0, static_cast<size_t> (chunkSize));
+            juce::dsp::ProcessContextReplacing<float> reverbContext (subReverbBlock);
+            reverbProcessor.process (reverbContext);
+        }
+
+        // 5. Master Summing
+        juce::FloatVectorOperations::clear (curDestLeft, chunkSize);
+        juce::FloatVectorOperations::clear (curDestRight, chunkSize);
+
+        for (int ch = 0; ch < numMidiChannels; ++ch)
+        {
+            const auto dryLevel = static_cast<float> (partParameters[static_cast<size_t> (ch)].dryLevel) / 127.0f;
+            juce::FloatVectorOperations::addWithMultiply (curDestLeft, partLeftPtrs[static_cast<size_t> (ch)], dryLevel, chunkSize);
+            juce::FloatVectorOperations::addWithMultiply (curDestRight, partRightPtrs[static_cast<size_t> (ch)], dryLevel, chunkSize);
+        }
+
+        const auto cReturn = isXg ? (static_cast<float> (chorusParameters.chorusReturn) / 64.0f)
+                                  : (isGs ? (static_cast<float> (gsChorusParameters.level) / 127.0f) : 1.0f);
+        if (cReturn > 0.0f)
+        {
+            const auto cPan = isXg ? (static_cast<float> (chorusParameters.chorusPan) / 127.0f) : 0.5f;
+            const auto cGainL = cReturn * std::cos (cPan * 1.5707963f) * 1.4142f;
+            const auto cGainR = cReturn * std::sin (cPan * 1.5707963f) * 1.4142f;
+            juce::FloatVectorOperations::addWithMultiply (curDestLeft, chorusBusBuffer.getReadPointer (0), cGainL, chunkSize);
+            juce::FloatVectorOperations::addWithMultiply (curDestRight, chorusBusBuffer.getReadPointer (1), cGainR, chunkSize);
+        }
+
+        const auto rReturn = isXg ? (static_cast<float> (reverbParameters.reverbReturn) / 64.0f)
+                                  : (isGs ? (static_cast<float> (gsReverbParameters.level) / 127.0f) : 1.0f);
+        if (rReturn > 0.0f)
+        {
+            const auto rPan = isXg ? (static_cast<float> (reverbParameters.reverbPan) / 127.0f) : 0.5f;
+            const auto rGainL = rReturn * std::cos (rPan * 1.5707963f) * 1.4142f;
+            const auto rGainR = rReturn * std::sin (rPan * 1.5707963f) * 1.4142f;
+            juce::FloatVectorOperations::addWithMultiply (curDestLeft, reverbBusBuffer.getReadPointer (0), rGainL, chunkSize);
+            juce::FloatVectorOperations::addWithMultiply (curDestRight, reverbBusBuffer.getReadPointer (1), rGainR, chunkSize);
+        }
+
+        if (isXg && variationParameters.connection == 1)
+        {
+            const auto vReturn = static_cast<float> (variationParameters.varReturn) / 64.0f;
+            if (vReturn > 0.0f)
+            {
+                const auto vPan = static_cast<float> (variationParameters.varPan) / 127.0f;
+                const auto vGainL = vReturn * std::cos (vPan * 1.5707963f) * 1.4142f;
+                const auto vGainR = vReturn * std::sin (vPan * 1.5707963f) * 1.4142f;
+                juce::FloatVectorOperations::addWithMultiply (curDestLeft, variationOutputBuffer.getReadPointer (0), vGainL, chunkSize);
+                juce::FloatVectorOperations::addWithMultiply (curDestRight, variationOutputBuffer.getReadPointer (1), vGainR, chunkSize);
+            }
+        }
+
+        samplesRendered += chunkSize;
+    }
+
+    // 6. Multi EQ
+    if (! effectBypassForTest && ! multiEqParameters.isFlat())
+    {
+        if (multiEqFiltersNeedUpdate)
+        {
+            updateMultiEqCoefficients();
+            multiEqFiltersNeedUpdate = false;
+        }
+
+        const auto numChans = juce::jmin (2, outBuffer.getNumChannels());
+        for (int ch = 0; ch < numChans; ++ch)
+        {
+            auto* channelData = outBuffer.getWritePointer (ch);
+            for (auto& f : multiEqFilters[static_cast<size_t> (ch)])
+                f.processSamples (channelData, numSamples);
+        }
+    }
+}
+

@@ -94,6 +94,52 @@ void testE01_VariationTypeMsbConstants()
     params.typeMsb = xg::varTypeTremolo;
     processor.updateParameters (params);
     logTestResult ("Tremolo (0x46) sets isAutoPan = false", processor.getIsAutoPanForTest() == false);
+
+    // DoD: all ten corrected type numbers must select a non-bypass DSP path.
+    struct TypeCase { uint8_t msb; const char* name; };
+    const std::array<TypeCase, 10> typeCases {{
+        { xg::varTypeChorus, "Chorus" },
+        { xg::varTypeFlanger, "Flanger" },
+        { xg::varTypeSymphonic, "Symphonic" },
+        { xg::varTypeTremolo, "Tremolo" },
+        { xg::varTypeAutoPan, "Auto Pan" },
+        { xg::varTypePhaser, "Phaser" },
+        { xg::varTypeDistortion, "Distortion" },
+        { xg::varTypeOverdrive, "Overdrive" },
+        { xg::varTypeAmpSimulator, "Amp Simulator" },
+        { xg::varTypeAutoWah, "Auto Wah" }
+    }};
+
+    juce::AudioBuffer<float> input (2, 4096);
+    for (int i = 0; i < input.getNumSamples(); ++i)
+    {
+        const auto sample = 0.25f * std::sin (2.0f * 3.14159265f * 440.0f * static_cast<float> (i) / 44100.0f);
+        input.setSample (0, i, sample);
+        input.setSample (1, i, sample);
+    }
+
+    for (const auto& typeCase : typeCases)
+    {
+        VariationEffectProcessor typeProcessor;
+        typeProcessor.prepare (44100.0, input.getNumSamples());
+        xg::VariationParameters typeParams;
+        typeParams.reset();
+        typeParams.typeMsb = typeCase.msb;
+        const auto defaults = xg::defaults::getVariationDefaults (typeParams.typeMsb, 0x00);
+        typeParams.parameters14Bit = defaults.params14Bit;
+        typeParams.parameters11To16 = defaults.params11To16;
+        typeProcessor.updateParameters (typeParams);
+
+        juce::AudioBuffer<float> output (2, input.getNumSamples());
+        typeProcessor.process (input, output, input.getNumSamples());
+        float difference = 0.0f;
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < input.getNumSamples(); ++i)
+                difference += std::abs (output.getSample (ch, i) - input.getSample (ch, i));
+
+        logTestResult (std::string (typeCase.name) + " selects an active DSP path",
+                       typeProcessor.getCurrentTypeMsb() == typeCase.msb && difference > 0.01f);
+    }
 }
 
 // =============================================================================
@@ -196,6 +242,147 @@ void testE04_ZeroValueHandling()
     varProc.updateParameters (varParams);
     logTestResult ("Tremolo LFO Depth=64 results in modDepth ~ 0.5f",
                    isNear (varProc.getModDepthForTest(), 64.0f / 127.0f, 0.01f));
+
+    // --- Audio Waveform Modulation Verification (DoD verification) ---
+    // 1. Tremolo Audio Modulation Stop / Resume
+    constexpr int numModSamples = 4096;
+    constexpr int warmupSamples = 4096;
+
+    juce::AudioBuffer<float> tremWarmup (2, warmupSamples);
+    juce::AudioBuffer<float> tremWarmupOut (2, warmupSamples);
+    for (int i = 0; i < warmupSamples; ++i)
+    {
+        const float s = std::sin (2.0f * 3.14159265f * 441.0f * static_cast<float> (i) / 44100.0f);
+        tremWarmup.setSample (0, i, s);
+        tremWarmup.setSample (1, i, s);
+    }
+
+    juce::AudioBuffer<float> tremIn (2, numModSamples);
+    for (int i = 0; i < numModSamples; ++i)
+    {
+        const float s = std::sin (2.0f * 3.14159265f * 441.0f * static_cast<float> (i + warmupSamples) / 44100.0f);
+        tremIn.setSample (0, i, s);
+        tremIn.setSample (1, i, s);
+    }
+    juce::AudioBuffer<float> tremOut (2, numModSamples);
+
+    varParams.reset();
+    varParams.typeMsb = xg::varTypeTremolo;
+    varParams.parameters14Bit[0] = 64;  // LFO Rate ≈ 2.69 Hz
+    varParams.parameters14Bit[9] = 127; // 100% Wet
+    varParams.parameters14Bit[1] = 0;   // Depth = 0 (stopped)
+    varProc.prepare (44100.0, numModSamples);
+    varProc.updateParameters (varParams);
+
+    varProc.process (tremWarmup, tremWarmupOut, warmupSamples); // warmup filter and delay state
+    varProc.process (tremIn, tremOut, numModSamples);
+
+    // 200 samples = exactly 2 cycles of 441Hz at 44100Hz
+    constexpr int subBlockSize = 200;
+    const int numSubBlocks = numModSamples / subBlockSize;
+    float minRmsDepth0 = 1000.0f;
+    float maxRmsDepth0 = 0.0f;
+    for (int b = 0; b < numSubBlocks; ++b)
+    {
+        const float rms = tremOut.getRMSLevel (0, b * subBlockSize, subBlockSize);
+        minRmsDepth0 = std::min (minRmsDepth0, rms);
+        maxRmsDepth0 = std::max (maxRmsDepth0, rms);
+    }
+    logTestResult ("Tremolo audio with Depth=0 has zero amplitude modulation (rms variation < 0.005f)",
+                   (maxRmsDepth0 - minRmsDepth0) < 0.005f);
+
+    // Now resume modulation with Depth = 127
+    varParams.parameters14Bit[1] = 127;
+    varProc.updateParameters (varParams);
+    varProc.process (tremIn, tremOut, numModSamples);
+
+    float minRmsDepth127 = 1000.0f;
+    float maxRmsDepth127 = 0.0f;
+    for (int b = 0; b < numSubBlocks; ++b)
+    {
+        const float rms = tremOut.getRMSLevel (0, b * subBlockSize, subBlockSize);
+        minRmsDepth127 = std::min (minRmsDepth127, rms);
+        maxRmsDepth127 = std::max (maxRmsDepth127, rms);
+    }
+    logTestResult ("Tremolo audio with Depth=127 exhibits active amplitude modulation (rms variation > 0.3f)",
+                   (maxRmsDepth127 - minRmsDepth127) > 0.3f);
+
+    // 2. Chorus Audio Modulation Stop / Resume
+    // Use 441Hz (exactly 100 samples per period at 44100Hz) and warmup to bypass initial delay filling
+    juce::AudioBuffer<float> choWarmup (2, warmupSamples);
+    juce::AudioBuffer<float> choWarmupOut (2, warmupSamples);
+    for (int i = 0; i < warmupSamples; ++i)
+    {
+        const float s = std::sin (2.0f * 3.14159265f * 441.0f * static_cast<float> (i) / 44100.0f);
+        choWarmup.setSample (0, i, s);
+        choWarmup.setSample (1, i, s);
+    }
+
+    juce::AudioBuffer<float> choIn (2, numModSamples);
+    for (int i = 0; i < numModSamples; ++i)
+    {
+        const float s = std::sin (2.0f * 3.14159265f * 441.0f * static_cast<float> (i + warmupSamples) / 44100.0f);
+        choIn.setSample (0, i, s);
+        choIn.setSample (1, i, s);
+    }
+    juce::AudioBuffer<float> choOut (2, numModSamples);
+
+    xg::VariationParameters choParams;
+    choParams.reset();
+    choParams.typeMsb = xg::varTypeChorus;
+    choParams.parameters14Bit[0] = 64;  // Rate ≈ 2.69 Hz
+    choParams.parameters14Bit[9] = 127; // 100% Wet
+    choParams.parameters14Bit[1] = 0;   // Depth = 0 (stopped)
+    varProc.updateParameters (choParams);
+    varProc.process (choWarmup, choWarmupOut, warmupSamples); // warmup delay line
+    varProc.process (choIn, choOut, numModSamples);
+
+    // 200 samples = exactly 2 integer cycles of 441Hz sine wave
+    constexpr int choBlockSize = 200;
+    const int numChoBlocks = numModSamples / choBlockSize;
+    float minRmsChoDepth0 = 1000.0f;
+    float maxRmsChoDepth0 = 0.0f;
+    for (int b = 0; b < numChoBlocks; ++b)
+    {
+        const float rms = choOut.getRMSLevel (0, b * choBlockSize, choBlockSize);
+        minRmsChoDepth0 = std::min (minRmsChoDepth0, rms);
+        maxRmsChoDepth0 = std::max (maxRmsChoDepth0, rms);
+    }
+    logTestResult ("Chorus audio with Depth=0 has constant output envelope (modulation stopped)",
+                   (maxRmsChoDepth0 - minRmsChoDepth0) < 0.005f);
+
+    // Resume Chorus modulation with Depth = 127
+    choParams.parameters14Bit[1] = 127;
+    varProc.updateParameters (choParams);
+    varProc.process (choIn, choOut, numModSamples);
+
+    float minRmsChoDepth127 = 1000.0f;
+    float maxRmsChoDepth127 = 0.0f;
+    for (int b = 0; b < numChoBlocks; ++b)
+    {
+        const float rms = choOut.getRMSLevel (0, b * choBlockSize, choBlockSize);
+        minRmsChoDepth127 = std::min (minRmsChoDepth127, rms);
+        maxRmsChoDepth127 = std::max (maxRmsChoDepth127, rms);
+    }
+    logTestResult ("Chorus audio with Depth=127 resumes modulation and alters envelope",
+                   (maxRmsChoDepth127 - minRmsChoDepth127) > 0.01f);
+
+    // 3. Out-of-range zero value handling (e.g. Feedback where 0 is outside 1..127 range)
+    // Specification: Chorus Feedback 1..127 (-63..+63, 64=0). Value 0 is out-of-range.
+    const uint8_t setChorusFbPositive[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x24, 0x60, 0xF7 };
+    engine.handleSysExForTest (setChorusFbPositive, sizeof (setChorusFbPositive));
+    const auto feedbackBeforeInvalidWrite = engine.getChorusParametersForTest().parameters[2];
+    const uint8_t setChorusFbZero[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x24, 0x00, 0xF7 };
+    engine.handleSysExForTest (setChorusFbZero, sizeof (setChorusFbZero));
+    logTestResult ("Out-of-range zero for Chorus Feedback is rejected and preserves the prior value",
+                   engine.getChorusParametersForTest().parameters[2] == feedbackBeforeInvalidWrite);
+
+    // Reverb Time uses Table#4, where data 0 is valid and means 0.3 seconds.
+    const uint8_t setRevTimeZero[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x02, 0x00, 0xF7 };
+    engine.handleSysExForTest (setRevTimeZero, sizeof (setRevTimeZero));
+    logTestResult ("Valid Reverb Time=0 is stored and maps to the 0.3s minimum",
+                   engine.getReverbParametersForTest().parameters[0] == 0
+                   && isNear (engine.getReverbProcessorRoomSizeForTest(), 0.10f, 0.02f));
 }
 
 // =============================================================================
@@ -222,6 +409,167 @@ void testE05_EffectSendConversion()
     const auto gain96 = FluidSynthEngine::testConvertEffectSendLevel (96);
     const auto expected96 = 1.0f + (32.0f / 63.0f) * (1.9952623f - 1.0f);
     logTestResult ("Send 96 yields expected interpolated gain", isNear (gain96, expected96, 0.001f));
+
+    // --- Audio Rendering & Route Measurement (DoD verification) ---
+    FluidSynthEngine engine;
+    engine.prepare (44100.0, 512);
+
+    const uint8_t xgSystemOn[] = { 0xF0, 0x43, 0x10, 0x4C, 0x00, 0x00, 0x7E, 0x00, 0xF7 };
+    engine.handleSysExForTest (xgSystemOn, sizeof (xgSystemOn));
+    engine.setEffectBypassForTest (true);
+
+    // Mute Part 1 Dry Level (Addr 08 00 11 = 0) and zero other sends initially
+    const uint8_t setDry0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x11, 0x00, 0xF7 };
+    engine.handleSysExForTest (setDry0, sizeof (setDry0));
+    const uint8_t setPartRev0_init[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x13, 0x00, 0xF7 };
+    engine.handleSysExForTest (setPartRev0_init, sizeof (setPartRev0_init));
+    const uint8_t setPartCho0_init[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x12, 0x00, 0xF7 };
+    engine.handleSysExForTest (setPartCho0_init, sizeof (setPartCho0_init));
+    const uint8_t setPartVar0_init[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x14, 0x00, 0xF7 };
+    engine.handleSysExForTest (setPartVar0_init, sizeof (setPartVar0_init));
+
+    // Prepare 1.0 amplitude 1000Hz test sine signal
+    juce::AudioBuffer<float> inSignal (2, 512);
+    for (int i = 0; i < 512; ++i)
+    {
+        const float s = std::sin (2.0f * 3.14159265f * 1000.0f * static_cast<float> (i) / 44100.0f);
+        inSignal.setSample (0, i, s);
+        inSignal.setSample (1, i, s);
+    }
+    juce::AudioBuffer<float> outBuf (2, 512);
+
+    // 1. Route 1: Variation -> Chorus
+    // Set Variation to System connection (02 01 5A = 01)
+    const uint8_t setVarSystem[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x5A, 0x01, 0xF7 };
+    engine.handleSysExForTest (setVarSystem, sizeof (setVarSystem));
+    // Part 1 VarSend = 127 (Part -> Var gain = 1.0, Addr 08 00 14 = 7F)
+    const uint8_t setPartVarSend127[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x14, 0x7F, 0xF7 };
+    engine.handleSysExForTest (setPartVarSend127, sizeof (setPartVarSend127));
+    // Var Return = 0 (do not sum Var directly to master)
+    const uint8_t setVarReturn0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x56, 0x00, 0xF7 };
+    engine.handleSysExForTest (setVarReturn0, sizeof (setVarReturn0));
+    // Var Send to Reverb = 0
+    const uint8_t setVarToRev0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x58, 0x00, 0xF7 };
+    engine.handleSysExForTest (setVarToRev0, sizeof (setVarToRev0));
+    // Chorus Return = 64 (0 dB)
+    const uint8_t setChoReturn64[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x2C, 0x40, 0xF7 };
+    engine.handleSysExForTest (setChoReturn64, sizeof (setChoReturn64));
+    // Chorus Send to Reverb = 0
+    const uint8_t setChoToRev0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x2E, 0x00, 0xF7 };
+    engine.handleSysExForTest (setChoToRev0, sizeof (setChoToRev0));
+    // Reverb Return = 0
+    const uint8_t setRevReturn0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x0C, 0x00, 0xF7 };
+    engine.handleSysExForTest (setRevReturn0, sizeof (setRevReturn0));
+
+    // Var -> Chorus Send = 0 (Addr 02 01 59 = 00)
+    const uint8_t setVarToCho0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x59, 0x00, 0xF7 };
+    engine.handleSysExForTest (setVarToCho0, sizeof (setVarToCho0));
+    engine.renderBlockWithInjectedPartForTest (outBuf, 0, inSignal);
+    logTestResult ("Audio route Var->Chorus: Send 0 produces zero output",
+                   outBuf.getMagnitude (0, 512) == 0.0f);
+
+    // Var -> Chorus Send = 64 (Addr 02 01 59 = 40)
+    const uint8_t setVarToCho64[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x59, 0x40, 0xF7 };
+    engine.handleSysExForTest (setVarToCho64, sizeof (setVarToCho64));
+    engine.renderBlockWithInjectedPartForTest (outBuf, 0, inSignal);
+    const float varToChoGain64 = outBuf.getMagnitude (0, 512);
+    logTestResult ("Audio route Var->Chorus: Send 64 produces gain ~1.0f (0 dB)",
+                   isNear (varToChoGain64, 1.0f, 0.02f));
+
+    // Var -> Chorus Send = 127 (Addr 02 01 59 = 7F)
+    const uint8_t setVarToCho127[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x59, 0x7F, 0xF7 };
+    engine.handleSysExForTest (setVarToCho127, sizeof (setVarToCho127));
+    engine.renderBlockWithInjectedPartForTest (outBuf, 0, inSignal);
+    const float varToChoGain127 = outBuf.getMagnitude (0, 512);
+    logTestResult ("Audio route Var->Chorus: Send 127 produces gain ~1.995f (+6 dB)",
+                   isNear (varToChoGain127 / varToChoGain64, 1.99526f, 0.02f));
+
+    // 2. Route 2: Chorus -> Reverb
+    // Part 1 VarSend = 0, Part 1 ChoSend = 127 (Part -> Cho gain = 1.0)
+    const uint8_t setPartVarSend0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x14, 0x00, 0xF7 };
+    engine.handleSysExForTest (setPartVarSend0, sizeof (setPartVarSend0));
+    const uint8_t setPartChoSend127[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x12, 0x7F, 0xF7 };
+    engine.handleSysExForTest (setPartChoSend127, sizeof (setPartChoSend127));
+    // Chorus Return = 0 (do not sum Chorus directly to master)
+    const uint8_t setChoReturn0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x2C, 0x00, 0xF7 };
+    engine.handleSysExForTest (setChoReturn0, sizeof (setChoReturn0));
+    // Reverb Return = 64 (0 dB)
+    const uint8_t setRevReturn64[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x0C, 0x40, 0xF7 };
+    engine.handleSysExForTest (setRevReturn64, sizeof (setRevReturn64));
+
+    // Cho -> Reverb Send = 0 (Addr 02 01 2E = 00)
+    const uint8_t setChoToRev0_test[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x2E, 0x00, 0xF7 };
+    engine.handleSysExForTest (setChoToRev0_test, sizeof (setChoToRev0_test));
+    engine.renderBlockWithInjectedPartForTest (outBuf, 0, inSignal);
+    logTestResult ("Audio route Chorus->Reverb: Send 0 produces zero output",
+                   outBuf.getMagnitude (0, 512) == 0.0f);
+
+    // Cho -> Reverb Send = 64 (Addr 02 01 2E = 40)
+    const uint8_t setChoToRev64[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x2E, 0x40, 0xF7 };
+    engine.handleSysExForTest (setChoToRev64, sizeof (setChoToRev64));
+    engine.renderBlockWithInjectedPartForTest (outBuf, 0, inSignal);
+    const float choToRevGain64 = outBuf.getMagnitude (0, 512);
+    logTestResult ("Audio route Chorus->Reverb: Send 64 produces gain ~1.0f (0 dB)",
+                   isNear (choToRevGain64, 1.0f, 0.02f));
+
+    // Cho -> Reverb Send = 127 (Addr 02 01 2E = 7F)
+    const uint8_t setChoToRev127[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x2E, 0x7F, 0xF7 };
+    engine.handleSysExForTest (setChoToRev127, sizeof (setChoToRev127));
+    engine.renderBlockWithInjectedPartForTest (outBuf, 0, inSignal);
+    const float choToRevGain127 = outBuf.getMagnitude (0, 512);
+    logTestResult ("Audio route Chorus->Reverb: Send 127 produces gain ~1.995f (+6 dB)",
+                   isNear (choToRevGain127 / choToRevGain64, 1.99526f, 0.02f));
+
+    // 3. Route 3: Variation -> Reverb
+    // Part 1 ChoSend = 0, Part 1 VarSend = 127 (Part -> Var gain = 1.0)
+    const uint8_t setPartChoSend0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x12, 0x00, 0xF7 };
+    engine.handleSysExForTest (setPartChoSend0, sizeof (setPartChoSend0));
+    engine.handleSysExForTest (setPartVarSend127, sizeof (setPartVarSend127));
+    // Var -> Chorus Send = 0
+    engine.handleSysExForTest (setVarToCho0, sizeof (setVarToCho0));
+
+    // Var -> Reverb Send = 0 (Addr 02 01 58 = 00)
+    const uint8_t setVarToRev0_test[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x58, 0x00, 0xF7 };
+    engine.handleSysExForTest (setVarToRev0_test, sizeof (setVarToRev0_test));
+    engine.renderBlockWithInjectedPartForTest (outBuf, 0, inSignal);
+    logTestResult ("Audio route Var->Reverb: Send 0 produces zero output",
+                   outBuf.getMagnitude (0, 512) == 0.0f);
+
+    // Var -> Reverb Send = 64 (Addr 02 01 58 = 40)
+    const uint8_t setVarToRev64[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x58, 0x40, 0xF7 };
+    engine.handleSysExForTest (setVarToRev64, sizeof (setVarToRev64));
+    engine.renderBlockWithInjectedPartForTest (outBuf, 0, inSignal);
+    const float varToRevGain64 = outBuf.getMagnitude (0, 512);
+    logTestResult ("Audio route Var->Reverb: Send 64 produces gain ~1.0f (0 dB)",
+                   isNear (varToRevGain64, 1.0f, 0.02f));
+
+    // Var -> Reverb Send = 127 (Addr 02 01 58 = 7F)
+    const uint8_t setVarToRev127[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x01, 0x58, 0x7F, 0xF7 };
+    engine.handleSysExForTest (setVarToRev127, sizeof (setVarToRev127));
+    engine.renderBlockWithInjectedPartForTest (outBuf, 0, inSignal);
+    const float varToRevGain127 = outBuf.getMagnitude (0, 512);
+    logTestResult ("Audio route Var->Reverb: Send 127 produces gain ~1.995f (+6 dB)",
+                   isNear (varToRevGain127 / varToRevGain64, 1.99526f, 0.02f));
+
+    // 4. Verification that Part Send is NOT modified (value / 127.0f, NOT +6 dB)
+    engine.handleSysExForTest (setPartVarSend0, sizeof (setPartVarSend0));
+    engine.handleSysExForTest (setVarToRev0_test, sizeof (setVarToRev0_test));
+
+    // Part 1 RevSend = 64 (Addr 08 00 13 = 40) -> 64 / 127.0f ≈ 0.5039f
+    const uint8_t setPartRevSend64[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x13, 0x40, 0xF7 };
+    engine.handleSysExForTest (setPartRevSend64, sizeof (setPartRevSend64));
+    engine.renderBlockWithInjectedPartForTest (outBuf, 0, inSignal);
+    const float partRevGain64 = outBuf.getMagnitude (0, 512);
+    logTestResult ("Part Send=64 preserves standard value/127 gain (~0.504f), NOT +0 dB (1.0f)",
+                   isNear (partRevGain64, 64.0f / 127.0f, 0.02f));
+
+    // Part 1 RevSend = 127 (Addr 08 00 13 = 7F) -> 127 / 127.0f = 1.0f
+    const uint8_t setPartRevSend127[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x13, 0x7F, 0xF7 };
+    engine.handleSysExForTest (setPartRevSend127, sizeof (setPartRevSend127));
+    engine.renderBlockWithInjectedPartForTest (outBuf, 0, inSignal);
+    const float partRevGain127 = outBuf.getMagnitude (0, 512);
+    logTestResult ("Part Send=127 produces gain ~1.0f (0 dB), NOT +6 dB (~2.0f)",
+                   isNear (partRevGain127, 1.0f, 0.02f));
 }
 
 // =============================================================================
@@ -233,13 +581,17 @@ void testE09_MultiEqPresets()
 
     xg::MultiEqParameters eq;
 
-    // 1. Flat (0)
+    // 1. Flat (0) (efctparamdeflt.pdf p.40)
     eq.setPreset (0);
     logTestResult ("Flat preset: All gains are 64", eq.isFlat());
     logTestResult ("Flat frequencies: 12, 28, 34, 46, 52",
                    eq.freq1 == 12 && eq.freq2 == 28 && eq.freq3 == 34 && eq.freq4 == 46 && eq.freq5 == 52);
+    logTestResult ("Flat Q: 7, 7, 7, 7, 7",
+                   eq.q1 == 7 && eq.q2 == 7 && eq.q3 == 7 && eq.q4 == 7 && eq.q5 == 7);
+    logTestResult ("Flat Shapes: Shelving (0) for Band 1 & 5",
+                   eq.shape1 == 0 && eq.shape5 == 0);
 
-    // 2. Jazz (1): Gain {58, 66, 68, 60, 58}, Freq {8, 16, 33, 44, 50}, Q {7, 3, 3, 5, 7}
+    // 2. Jazz (1): Gain {58, 66, 68, 60, 58}, Freq {8, 16, 33, 44, 50}, Q {7, 3, 3, 5, 7}, Shapes {0, 0}
     eq.setPreset (1);
     logTestResult ("Jazz preset gains: 58, 66, 68, 60, 58",
                    eq.gain1 == 58 && eq.gain2 == 66 && eq.gain3 == 68 && eq.gain4 == 60 && eq.gain5 == 58);
@@ -247,29 +599,137 @@ void testE09_MultiEqPresets()
                    eq.freq1 == 8 && eq.freq2 == 16 && eq.freq3 == 33 && eq.freq4 == 44 && eq.freq5 == 50);
     logTestResult ("Jazz preset Q: 7, 3, 3, 5, 7",
                    eq.q1 == 7 && eq.q2 == 3 && eq.q3 == 3 && eq.q4 == 5 && eq.q5 == 7);
+    logTestResult ("Jazz preset Shapes: Shelving (0) for Band 1 & 5",
+                   eq.shape1 == 0 && eq.shape5 == 0);
 
-    // 3. Pops (2): Gain {68, 60, 67, 60, 70}, Freq {16, 24, 34, 40, 48}, Q {7, 20, 7, 20, 7}
+    // 3. Pops (2): Gain {68, 60, 67, 60, 70}, Freq {16, 24, 34, 40, 48}, Q {7, 20, 7, 20, 7}, Shapes {0, 0}
     eq.setPreset (2);
     logTestResult ("Pops preset gains: 68, 60, 67, 60, 70",
                    eq.gain1 == 68 && eq.gain2 == 60 && eq.gain3 == 67 && eq.gain4 == 60 && eq.gain5 == 70);
+    logTestResult ("Pops preset frequencies: 16, 24, 34, 40, 48",
+                   eq.freq1 == 16 && eq.freq2 == 24 && eq.freq3 == 34 && eq.freq4 == 40 && eq.freq5 == 48);
     logTestResult ("Pops preset Q: 7, 20, 7, 20, 7",
                    eq.q1 == 7 && eq.q2 == 20 && eq.q3 == 7 && eq.q4 == 20 && eq.q5 == 7);
+    logTestResult ("Pops preset Shapes: Shelving (0) for Band 1 & 5",
+                   eq.shape1 == 0 && eq.shape5 == 0);
 
-    // 4. Rock (3): Gain {71, 68, 60, 68, 66}, Freq {16, 20, 36, 41, 50}, Q {7, 7, 5, 10, 7}
+    // 4. Rock (3): Gain {71, 68, 60, 68, 66}, Freq {16, 20, 36, 41, 50}, Q {7, 7, 5, 10, 7}, Shapes {0, 0}
     eq.setPreset (3);
     logTestResult ("Rock preset gains: 71, 68, 60, 68, 66",
                    eq.gain1 == 71 && eq.gain2 == 68 && eq.gain3 == 60 && eq.gain4 == 68 && eq.gain5 == 66);
+    logTestResult ("Rock preset frequencies: 16, 20, 36, 41, 50",
+                   eq.freq1 == 16 && eq.freq2 == 20 && eq.freq3 == 36 && eq.freq4 == 41 && eq.freq5 == 50);
+    logTestResult ("Rock preset Q: 7, 7, 5, 10, 7",
+                   eq.q1 == 7 && eq.q2 == 7 && eq.q3 == 5 && eq.q4 == 10 && eq.q5 == 7);
+    logTestResult ("Rock preset Shapes: Shelving (0) for Band 1 & 5",
+                   eq.shape1 == 0 && eq.shape5 == 0);
 
-    // 5. Concert (4): Gain {67, 68, 64, 66, 61}, Freq {12, 24, 34, 50, 52}, Q {7, 7, 5, 7, 7}
+    // 5. Concert (4): Gain {67, 68, 64, 66, 61}, Freq {12, 24, 34, 50, 52}, Q {7, 7, 5, 7, 7}, Shapes {0, 0}
     eq.setPreset (4);
     logTestResult ("Concert preset gains: 67, 68, 64, 66, 61",
                    eq.gain1 == 67 && eq.gain2 == 68 && eq.gain3 == 64 && eq.gain4 == 66 && eq.gain5 == 61);
+    logTestResult ("Concert preset frequencies: 12, 24, 34, 50, 52",
+                   eq.freq1 == 12 && eq.freq2 == 24 && eq.freq3 == 34 && eq.freq4 == 50 && eq.freq5 == 52);
+    logTestResult ("Concert preset Q: 7, 7, 5, 7, 7",
+                   eq.q1 == 7 && eq.q2 == 7 && eq.q3 == 5 && eq.q4 == 7 && eq.q5 == 7);
+    logTestResult ("Concert preset Shapes: Shelving (0) for Band 1 & 5",
+                   eq.shape1 == 0 && eq.shape5 == 0);
 
-    // Resetting back to Flat after custom edit restores all parameters
-    eq.gain1 = 80;
-    eq.freq1 = 40;
+    // Resetting back to Flat after custom edit restores all 17 parameters completely
+    eq.gain1 = 80; eq.freq1 = 40; eq.q1 = 25; eq.shape1 = 1;
+    eq.gain2 = 80; eq.freq2 = 40; eq.q2 = 25;
+    eq.gain3 = 80; eq.freq3 = 40; eq.q3 = 25;
+    eq.gain4 = 80; eq.freq4 = 40; eq.q4 = 25;
+    eq.gain5 = 80; eq.freq5 = 40; eq.q5 = 25; eq.shape5 = 1;
+
     eq.setPreset (0);
-    logTestResult ("Resetting to Flat cleans up custom edits", eq.gain1 == 64 && eq.freq1 == 12);
+    logTestResult ("Resetting to Flat cleans up custom edits across all 17 parameters",
+                   eq.gain1 == 64 && eq.freq1 == 12 && eq.q1 == 7 && eq.shape1 == 0
+                   && eq.gain2 == 64 && eq.freq2 == 28 && eq.q2 == 7
+                   && eq.gain3 == 64 && eq.freq3 == 34 && eq.q3 == 7
+                   && eq.gain4 == 64 && eq.freq4 == 46 && eq.q4 == 7
+                   && eq.gain5 == 64 && eq.freq5 == 52 && eq.q5 == 7 && eq.shape5 == 0);
+
+    // --- DSP Frequency Response Audio Measurement (DoD verification) ---
+    FluidSynthEngine eqEngine;
+    eqEngine.prepare (44100.0, 512);
+
+    const uint8_t eqXgOn[] = { 0xF0, 0x43, 0x10, 0x4C, 0x00, 0x00, 0x7E, 0x00, 0xF7 };
+    eqEngine.handleSysExForTest (eqXgOn, sizeof (eqXgOn));
+    eqEngine.setEffectBypassForTest (false); // ensure Multi EQ is active
+
+    // Part 1 Dry Level = 127, all sends = 0
+    const uint8_t setDry127[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x11, 0x7F, 0xF7 };
+    eqEngine.handleSysExForTest (setDry127, sizeof (setDry127));
+    const uint8_t setCho0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x12, 0x00, 0xF7 };
+    eqEngine.handleSysExForTest (setCho0, sizeof (setCho0));
+    const uint8_t setRev0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x13, 0x00, 0xF7 };
+    eqEngine.handleSysExForTest (setRev0, sizeof (setRev0));
+    const uint8_t setVar0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x14, 0x00, 0xF7 };
+    eqEngine.handleSysExForTest (setVar0, sizeof (setVar0));
+
+    auto makeSineSignal = [] (float freqHz, int numSamples)
+    {
+        juce::AudioBuffer<float> buf (2, numSamples);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float s = std::sin (2.0f * 3.14159265f * freqHz * static_cast<float> (i) / 44100.0f);
+            buf.setSample (0, i, s);
+            buf.setSample (1, i, s);
+        }
+        return buf;
+    };
+
+    const auto lowSine = makeSineSignal (50.0f, 512);
+    const auto midSine = makeSineSignal (1000.0f, 512);
+    const auto highSine = makeSineSignal (8000.0f, 512);
+    juce::AudioBuffer<float> eqOut (2, 512);
+
+    // 1. Flat (Baseline RMS)
+    const uint8_t setEqFlat[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x40, 0x00, 0x00, 0xF7 };
+    eqEngine.handleSysExForTest (setEqFlat, sizeof (setEqFlat));
+
+    eqEngine.renderBlockWithInjectedPartForTest (eqOut, 0, lowSine);
+    const float flatLowRms = eqOut.getRMSLevel (0, 0, 512);
+
+    eqEngine.renderBlockWithInjectedPartForTest (eqOut, 0, midSine);
+    const float flatMidRms = eqOut.getRMSLevel (0, 0, 512);
+
+    eqEngine.renderBlockWithInjectedPartForTest (eqOut, 0, highSine);
+    const float flatHighRms = eqOut.getRMSLevel (0, 0, 512);
+
+    // 2. Jazz preset (Addr 02 40 00 = 01): Band 1 = -6dB (cut), Band 3 = +4dB (boost), Band 5 = -6dB (cut)
+    const uint8_t setEqJazz[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x40, 0x00, 0x01, 0xF7 };
+    eqEngine.handleSysExForTest (setEqJazz, sizeof (setEqJazz));
+
+    eqEngine.renderBlockWithInjectedPartForTest (eqOut, 0, lowSine);
+    const float jazzLowRms = eqOut.getRMSLevel (0, 0, 512);
+    logTestResult ("Multi EQ DSP Jazz preset attenuates Low band (50Hz) relative to Flat",
+                   jazzLowRms < flatLowRms * 0.85f);
+
+    eqEngine.renderBlockWithInjectedPartForTest (eqOut, 0, midSine);
+    const float jazzMidRms = eqOut.getRMSLevel (0, 0, 512);
+    logTestResult ("Multi EQ DSP Jazz preset boosts Mid band (1kHz) relative to Flat",
+                   jazzMidRms > flatMidRms * 1.15f);
+
+    eqEngine.renderBlockWithInjectedPartForTest (eqOut, 0, highSine);
+    const float jazzHighRms = eqOut.getRMSLevel (0, 0, 512);
+    logTestResult ("Multi EQ DSP Jazz preset attenuates High band (8kHz) relative to Flat",
+                   jazzHighRms < flatHighRms * 0.85f);
+
+    // 3. Rock preset (Addr 02 40 00 = 03): Band 1 = +7dB (boost), Band 3 = -4dB (cut)
+    const uint8_t setEqRock[] = { 0xF0, 0x43, 0x10, 0x4C, 0x02, 0x40, 0x00, 0x03, 0xF7 };
+    eqEngine.handleSysExForTest (setEqRock, sizeof (setEqRock));
+
+    eqEngine.renderBlockWithInjectedPartForTest (eqOut, 0, lowSine);
+    const float rockLowRms = eqOut.getRMSLevel (0, 0, 512);
+    logTestResult ("Multi EQ DSP Rock preset boosts Low band (80Hz) relative to Flat",
+                   rockLowRms > flatLowRms * 1.25f);
+
+    eqEngine.renderBlockWithInjectedPartForTest (eqOut, 0, midSine);
+    const float rockMidRms = eqOut.getRMSLevel (0, 0, 512);
+    logTestResult ("Multi EQ DSP Rock preset attenuates Mid band (1kHz) relative to Flat",
+                   rockMidRms < flatMidRms * 0.85f);
 }
 
 // =============================================================================
@@ -310,6 +770,25 @@ void testE10_MultiPartResetValues()
     logTestResult ("Parts 1..9, 11..16 Part Mode is Normal (0x00)", otherModesNormal);
     logTestResult ("Parts 1..9, 11..16 Element Reserve is 2", otherReservesTwo);
     logTestResult ("All Parts 1..16 Rcv Channel matches channel index (0..15)", rcvChannelsMatch);
+
+    // The shared reset path must retain the mode-specific GM and GS defaults.
+    FluidSynthEngine gmEngine;
+    gmEngine.setEngineMode (FluidSynthEngine::EngineMode::GM);
+    const uint8_t gmSystemOn[] = { 0xF0, 0x7E, 0x7F, 0x09, 0x01, 0xF7 };
+    gmEngine.handleSysExForTest (gmSystemOn, sizeof (gmSystemOn));
+    logTestResult ("GM reset retains GM mode and GM channel-volume default",
+                   gmEngine.getActiveMode() == FluidSynthEngine::ActiveMode::GM
+                   && gmEngine.getChannelState (0).volume == 127);
+
+    FluidSynthEngine gsEngine;
+    gsEngine.setEngineMode (FluidSynthEngine::EngineMode::GS);
+    const uint8_t gsReset[] = { 0xF0, 0x41, 0x10, 0x42, 0x12, 0x40, 0x00, 0x7F, 0x00, 0x41, 0xF7 };
+    gsEngine.handleSysExForTest (gsReset, sizeof (gsReset));
+    logTestResult ("GS reset retains GS mode and GS channel-volume default",
+                   gsEngine.getActiveMode() == FluidSynthEngine::ActiveMode::GS
+                   && gsEngine.getChannelState (0).volume == 100);
+    logTestResult ("GS reset retains the GS default drum part on Part 10",
+                   gsEngine.getChannelState (9).gsPartMode == gs::PartMode::Drum1);
 }
 
 // =============================================================================

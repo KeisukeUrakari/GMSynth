@@ -162,6 +162,10 @@ public:
         if (activeSynth == nullptr) return false;
         return activeSynth->availableBanks.find (bank) != activeSynth->availableBanks.end();
     }
+    void setEffectBypassForTest (bool bypass) noexcept { effectBypassForTest = bypass; }
+    void renderBlockWithInjectedPartForTest (juce::AudioBuffer<float>& outBuffer,
+                                            int part,
+                                            const juce::AudioBuffer<float>& inSignal) noexcept;
 
 private:
     struct PresetLocation
@@ -368,6 +372,7 @@ private:
     xg::MultiEqParameters multiEqParameters;
     std::array<std::array<juce::IIRFilter, 5>, 2> multiEqFilters;
     bool multiEqFiltersNeedUpdate = true;
+    bool effectBypassForTest = false;
 
     juce::AbstractFifo retiredFifo { maxRetiredChanges };
     std::array<RetiredChange, maxRetiredChanges> retiredChanges;

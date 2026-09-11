@@ -2,15 +2,15 @@
 
 最終検証日: 2026-09-11
 
-対象実装: `70d7b30`
+対象実装: 2026-09-11時点の作業ツリー（未コミット変更を含む）
 
 根拠資料: `specific/` 配下のヤマハXG仕様書 V1.35
 
 ## 結論
 
-Phase 1は主要な修正を確認できたが、完了条件に含まれる実音・周波数応答の測定には不足が残る。Phase 2とPhase 3は未完了であり、従来の「Phase 1〜3全タスク完了」は裏付けられない。
+Phase 1（TASK-101〜106）は、仕様書、実装、完了条件（DoD）および回帰テストを再照合し、定義された対応範囲について完了と判定した。Phase 2とPhase 3は未完了であり、「Phase 1〜3全タスク完了」とは判定しない。
 
-`scripts/run_xg_tests.sh`はビルドを含め正常終了し、107/107アサーションがPASSした。ただし、これは現在書かれているテストの通過を示すだけで、各タスクのDoDやXG規格全体への適合を証明しない。
+`scripts/run_xg_tests.sh`はビルドを含め正常終了し、153/153アサーションがPASSした。Phase 1については、定数・状態値だけでなく、Variation DSP選択、エフェクト間Send、Multi EQ周波数応答、Depth=0の変調停止・復帰も音声処理で確認した。ただし、これはXG規格全体への適合認証を意味しない。
 
 ## 検証方法と資料
 
@@ -29,7 +29,7 @@ SoundFont全音色の照合、代表的XG SMFの聴感確認、実機との音�
 
 | Phase | 判定 | 概要 |
 |---|---|---|
-| Phase 1 | 概ね実装済み・測定不足 | 定数、初期値、Send換算、Drum Setup方針は主要経路で修正済み。実音・全プリセット応答のDoDは未充足。 |
+| Phase 1 | 完了 | TASK-101〜106の実装とDoDを確認。Variation DSP選択、3つのエフェクト間Send、Multi EQ代表周波数応答、Depth=0の停止・復帰を音声処理で検証済み。 |
 | Phase 2 | 未完了 | Variation LSBサブタイプのDSP差、Reverbの有効パラメータ反映、Delay全経路の測定が不足。 |
 | Phase 3 | 未完了 | ドラムキット維持を証明できず、Element Reserveの実装と試験がDoDを満たさない。SFX定数の取り違えもある。 |
 
@@ -37,21 +37,21 @@ SoundFont全音色の照合、代表的XG SMFの聴感確認、実機との音�
 
 ### E01: Variation種類番号
 
-`XgModel.h`の10種類のMSBはEffect Mapと一致し、主要分岐も定数参照へ変更されている。Distortion `49H`、Overdrive `4AH`、Amp Simulator `4BH`のDSP選択テストも通過した。
+`XgModel.h`の10種類のMSBはEffect Mapと一致し、主要分岐も定数参照へ変更されている。10種類すべてについて正規MSBから非バイパスのDSP経路が選択され、Distortion `49H`がAmp Simulatorへ誤選択されないことも確認した。
 
 ### E04: 有効なゼロ値
 
-ChorusとTremoloのDepth=0がDSP設定へ反映され、非ゼロ値で復帰することを確認した。ただし全種類のゼロ許容パラメータを網羅したものではない。
+ChorusとTremoloのDepth=0がDSP設定と音声へ反映され、変調が停止し、Depth=127で復帰することを確認した。値域外であるChorus Feedback=0は受信時に拒否され、直前の有効値を保持する。Reverb Time=0は値域外ではなく、Table#4で有効な最小値0.3秒として保存・変換される。
 
 ### E05: エフェクト間Send
 
-Variation→Chorus、Chorus→Reverb、Variation→Reverbは専用換算を使用し、0=無音、64=1.0、127≒1.9953となる。パートSendの`value / 127`は維持されている。中間値は仕様に明記されていない折れ線補間なので近似式として扱う。
+Variation→Chorus、Chorus→Reverb、Variation→Reverbは専用換算を使用し、各音声経路の測定で0=無音、64=1.0、127≒1.9953となることを確認した。パートSendの`value / 127`も音声測定で維持を確認した。中間値は仕様に明記されていない折れ線補間なので近似式として扱う。
 
 ### E08・E09・E10
 
 - Drum Setupは1・2のみを対応範囲とし、Part Mode 04/05を無視する方針とコード経路が一致する。
-- Multi EQの5プリセット値は仕様表と一致する実装へ更新された。ただし全バンド・Shapeの実周波数応答は未測定。
-- XG System On後のRcv Channel、Part 10のDrums1、Element Reserve初期値は仕様表と一致する。
+- Multi EQの5プリセットについて全17項目が仕様表と一致し、カスタム編集後の再選択で全項目が初期化される。JazzとRockの低域・中域・高域に対する代表周波数応答も測定した。
+- XG System On後のRcv Channel、Part 10のDrums1、Element Reserve初期値は仕様表と一致する。共通リセット経路がGM/GSのモード固有初期値を壊さないことも確認した。
 
 ## 未完了・要修正事項
 
@@ -128,16 +128,16 @@ SingleとMultiには動作テストがあるが、INSTのドラム・インス�
 2026-09-11に`./scripts/run_xg_tests.sh`を実行した。
 
 ```text
-TOTAL: 107 | PASSED: 107 | FAILED: 0
+TOTAL: 153 | PASSED: 153 | FAILED: 0
 ```
 
-107は独立した仕様項目数ではなくアサーション数である。次のテスト追加が必要となる。
+153は独立した仕様項目数ではなくアサーション数である。Phase 1のDoDに必要な検査は追加されたが、Phase 2以降について次のテスト追加が必要となる。
 
 1. 全Effect Type MSB/LSBの初期値とType変更後の状態
 2. Delay全タイプのインパルス到達時間、Input Select全値、Feedback、High Damp
 3. DistortionサブタイプごとのDSP差と予約LSB
 4. Reverbの実測減衰時間、Diffusion、LPF周波数応答
-5. Multi EQ全プリセット・全バンド・Shapeの周波数応答
+5. Multi EQの未測定プリセット・バンド・Shapeを含む、より詳細な周波数応答
 6. 固定プリセット構成によるNormal、SFX、Proxy、Drumの選択先
 7. 発音上限到達時のElement ReserveとSame Note Assign INST
 
