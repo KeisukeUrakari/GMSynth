@@ -30,6 +30,14 @@ namespace xg
         return mode != PartMode::Normal;
     }
 
+    // Same Note Assign definitions (Multi Part Parameter 0x0E)
+    enum class SameNoteAssign : uint8_t
+    {
+        Single = 0,
+        Multi  = 1,
+        Inst   = 2
+    };
+
     // Default values according to XG Format V1.35
     constexpr int defaultVolume = 100;     // 64H
     constexpr int defaultPan = 64;         // 40H (Center)

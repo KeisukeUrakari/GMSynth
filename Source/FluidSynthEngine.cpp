@@ -82,6 +82,10 @@ FluidSynthEngine::FluidSynthEngine()
         drumPartProtectMode[index].store (isDrum, std::memory_order_relaxed);
         channelProgram[index].store (0, std::memory_order_relaxed);
         channelModulation[index].store (0, std::memory_order_relaxed);
+        channelIsSilentVoice[index].store (false, std::memory_order_relaxed);
+        channelLastValidMelodicLsb[index].store (0, std::memory_order_relaxed);
+        channelActiveVoiceCount[index].store (0, std::memory_order_relaxed);
+        activeNoteInstances[index].fill (0);
     }
 
     systemParameters.reset();
@@ -265,6 +269,8 @@ std::unique_ptr<FluidSynthEngine::SynthInstance> FluidSynthEngine::createSynth (
             if (bank < 0 || bank > 16383 || program < 0 || program >= 128)
                 continue;
 
+            instance->availableBanks.insert (bank);
+
             const PresetLocation location { soundFontId, bank, program };
             instance->presetsByProgram[static_cast<size_t> (program)].push_back (location);
 
@@ -371,7 +377,131 @@ void FluidSynthEngine::applyProgramChangeToSynth (SynthInstance& instance,
 
     const PresetLocation* chosen = nullptr;
 
-    if (isPercussionChannel)
+    if (activeMode == ActiveMode::XG && juce::isPositiveAndBelow (channel, static_cast<int> (numMidiChannels)))
+    {
+        const auto chIdx = static_cast<size_t> (channel);
+
+        if (isPercussionChannel)
+        {
+            // 1. Try exact requested bank in percussion presets (e.g. XG drum bank 16256)
+            chosen = findPresetInBank (percussionPresetsForProgram, requestedBank);
+
+            // 2. If not found, try standard SF2 percussion bank 128
+            if (chosen == nullptr && requestedBank != 128)
+                chosen = findPresetInBank (percussionPresetsForProgram, 128);
+
+            // 3. XG drum fallback rule: ignore unsupported drum kits and maintain previous kit
+            if (chosen == nullptr)
+                return;
+
+            channelIsSilentVoice[chIdx].store (false, std::memory_order_release);
+        }
+        else
+        {
+            // Melodic part fallback strategy
+            if (bankMsb == xg::bankMsbSfxKit) // SFX Bank (MSB 0x40 = 64)
+            {
+                chosen = findPresetInBank (allPresetsForProgram, requestedBank);
+                if (chosen == nullptr && requestedBank != 64)
+                    chosen = findPresetInBank (allPresetsForProgram, 64);
+
+                if (chosen != nullptr)
+                {
+                    channelIsSilentVoice[chIdx].store (false, std::memory_order_release);
+                }
+                else
+                {
+                    // Unsampled SFX: silent voice without falling back to Bank 0
+                    channelIsSilentVoice[chIdx].store (true, std::memory_order_release);
+                    return;
+                }
+            }
+            else if (bankMsb >= 0x60 && bankMsb <= 0x6F) // Proxy Bank (MSB 96..111)
+            {
+                chosen = findPresetInBank (allPresetsForProgram, requestedBank);
+                if (chosen != nullptr)
+                {
+                    channelIsSilentVoice[chIdx].store (false, std::memory_order_release);
+                }
+                else
+                {
+                    // Proxy bank fallback to Normal Bank 0
+                    chosen = findPresetInBank (allPresetsForProgram, 0);
+                    if (chosen != nullptr)
+                    {
+                        channelIsSilentVoice[chIdx].store (false, std::memory_order_release);
+                    }
+                    else
+                    {
+                        channelIsSilentVoice[chIdx].store (true, std::memory_order_release);
+                        return;
+                    }
+                }
+            }
+            else if (bankMsb > 0 && bankMsb != xg::bankMsbDrumKit) // Other non-zero MSB
+            {
+                chosen = findPresetInBank (allPresetsForProgram, requestedBank);
+                if (chosen != nullptr)
+                {
+                    channelIsSilentVoice[chIdx].store (false, std::memory_order_release);
+                }
+                else
+                {
+                    // Unsampled non-zero MSB voice: silent voice
+                    channelIsSilentVoice[chIdx].store (true, std::memory_order_release);
+                    return;
+                }
+            }
+            else // Normal Bank (MSB 0x00)
+            {
+                const bool bankExists = (instance.availableBanks.find (bankLsb) != instance.availableBanks.end());
+
+                if (! bankExists)
+                {
+                    // Unsupported LSB bank: retain last valid melodic LSB
+                    const auto lastLsb = channelLastValidMelodicLsb[chIdx].load (std::memory_order_acquire);
+                    chosen = findPresetInBank (allPresetsForProgram, lastLsb);
+                    if (chosen == nullptr && lastLsb != 0)
+                        chosen = findPresetInBank (allPresetsForProgram, 0);
+
+                    if (chosen != nullptr)
+                    {
+                        channelIsSilentVoice[chIdx].store (false, std::memory_order_release);
+                    }
+                    else
+                    {
+                        channelIsSilentVoice[chIdx].store (true, std::memory_order_release);
+                        return;
+                    }
+                }
+                else
+                {
+                    // Bank exists (either fully or partially populated)
+                    chosen = findPresetInBank (allPresetsForProgram, bankLsb);
+                    if (chosen != nullptr)
+                    {
+                        channelLastValidMelodicLsb[chIdx].store (static_cast<uint8_t> (bankLsb), std::memory_order_release);
+                        channelIsSilentVoice[chIdx].store (false, std::memory_order_release);
+                    }
+                    else
+                    {
+                        // Partially populated bank: substitute with basic voice set (Bank 0)
+                        chosen = findPresetInBank (allPresetsForProgram, 0);
+                        if (chosen != nullptr)
+                        {
+                            channelIsSilentVoice[chIdx].store (false, std::memory_order_release);
+                        }
+                        else
+                        {
+                            channelIsSilentVoice[chIdx].store (true, std::memory_order_release);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    else if (isPercussionChannel)
     {
         // 1. Try exact requested bank in percussion presets (e.g. XG drum bank 16256)
         chosen = findPresetInBank (percussionPresetsForProgram, requestedBank);
@@ -509,6 +639,8 @@ void FluidSynthEngine::initializeSynthChannelState (SynthInstance& instance) noe
         const auto isPercussion = gsMode ? gs::isDrumMode (gsPart)
                                          : (xg::isDrumMode (partMode) || bankMsb == xg::bankMsbDrumKit || bankMsb == xg::bankMsbSfxKit);
         const auto program = juce::jlimit (0, 127, channelProgram[index].load (std::memory_order_acquire));
+        channelIsSilentVoice[index].store (false, std::memory_order_release);
+        channelLastValidMelodicLsb[index].store (0, std::memory_order_release);
 
         const auto& params = partParameters[index];
         const auto monoPoly = (params.monoPolyMode == 0) ? FLUID_CHANNEL_MODE_OMNIOFF_MONO : FLUID_CHANNEL_MODE_OMNIOFF_POLY;
@@ -1122,6 +1254,10 @@ void FluidSynthEngine::resetChannelState (int channel) noexcept
     drumPartProtectMode[index].store (isDrum, std::memory_order_release);
     channelProgram[index].store (0, std::memory_order_release);
     channelModulation[index].store (0, std::memory_order_release);
+    channelIsSilentVoice[index].store (false, std::memory_order_release);
+    channelLastValidMelodicLsb[index].store (0, std::memory_order_release);
+    channelActiveVoiceCount[index].store (0, std::memory_order_release);
+    activeNoteInstances[index].fill (0);
 
     partParameters[index].reset (channel);
     gsPartParameters[index].reset (channel);
@@ -3330,6 +3466,61 @@ void FluidSynthEngine::applyMelodicVoiceGenerators (fluid_voice_t* v, int channe
     }
 }
 
+void FluidSynthEngine::ensureElementReserveProtected (int targetPart) noexcept
+{
+    juce::ignoreUnused (targetPart);
+    if (activeSynth == nullptr || activeSynth->synth == nullptr)
+        return;
+
+    const int maxPoly = fluid_synth_get_polyphony (activeSynth->synth);
+    const int currentVoices = fluid_synth_get_active_voice_count (activeSynth->synth);
+
+    if (currentVoices < maxPoly - 2)
+        return;
+
+    int worstPart = -1;
+    int maxExcess = 0;
+    for (int p = 0; p < numMidiChannels; ++p)
+    {
+        const auto excess = channelActiveVoiceCount[static_cast<size_t> (p)].load (std::memory_order_relaxed)
+                          - static_cast<int> (partParameters[static_cast<size_t> (p)].elementReserve);
+        if (excess > maxExcess)
+        {
+            maxExcess = excess;
+            worstPart = p;
+        }
+    }
+
+    if (worstPart >= 0 && maxExcess > 0)
+    {
+        std::array<fluid_voice_t*, 256> voices {};
+        fluid_synth_get_voicelist (activeSynth->synth, voices.data(), static_cast<int> (voices.size()), -1);
+        fluid_voice_t* oldestVoice = nullptr;
+        unsigned int minId = 0xFFFFFFFF;
+        for (auto* v : voices)
+        {
+            if (v == nullptr) break;
+            if (fluid_voice_get_channel (v) == worstPart)
+            {
+                const auto vid = fluid_voice_get_id (v);
+                if (vid < minId)
+                {
+                    minId = vid;
+                    oldestVoice = v;
+                }
+            }
+        }
+        if (oldestVoice != nullptr)
+        {
+            const auto key = fluid_voice_get_key (oldestVoice);
+            fluid_synth_noteoff (activeSynth->synth, worstPart, key);
+            auto cnt = channelActiveVoiceCount[static_cast<size_t> (worstPart)].load (std::memory_order_relaxed);
+            if (cnt > 0)
+                channelActiveVoiceCount[static_cast<size_t> (worstPart)].store (cnt - 1, std::memory_order_relaxed);
+        }
+    }
+}
+
 void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noexcept
 {
     if (message.isSysEx())
@@ -3338,10 +3529,29 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
         return;
     }
 
-    const auto channel = message.getChannel() - 1;
-    if (! juce::isPositiveAndBelow (channel, numMidiChannels))
+    const auto midiChannel = message.getChannel() - 1;
+    if (! juce::isPositiveAndBelow (midiChannel, numMidiChannels))
         return;
 
+    const auto activeMode = getActiveMode();
+    if (activeMode == ActiveMode::XG)
+    {
+        for (int p = 0; p < numMidiChannels; ++p)
+        {
+            if (partParameters[static_cast<size_t> (p)].rcvChannel == midiChannel)
+            {
+                dispatchMidiMessageToPart (p, message);
+            }
+        }
+    }
+    else
+    {
+        dispatchMidiMessageToPart (midiChannel, message);
+    }
+}
+
+void FluidSynthEngine::dispatchMidiMessageToPart (int channel, const juce::MidiMessage& message) noexcept
+{
     const auto activeMode = getActiveMode();
     const auto gsMode = (activeMode == ActiveMode::GS);
 
@@ -3349,9 +3559,14 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
     {
         if (activeSynth != nullptr)
         {
+            const auto index = static_cast<size_t> (channel);
+
+            // Silent Voice check (unsupported SFX/non-zero MSB voices do not sound)
+            if (channelIsSilentVoice[index].load (std::memory_order_acquire))
+                return;
+
             const auto noteNumber = message.getNoteNumber();
             const auto rawVelocity = message.getVelocity();
-            const auto index = static_cast<size_t> (channel);
             const auto partModeRaw = channelPartMode[index].load (std::memory_order_acquire);
             const auto msb = channelBankMsb[index].load (std::memory_order_acquire);
             const auto partMode = static_cast<xg::PartMode> (partModeRaw);
@@ -3365,6 +3580,30 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
 
             if (isDrum && juce::isPositiveAndBelow (noteNumber, 128))
             {
+                if (! gsMode && activeMode == ActiveMode::XG)
+                {
+                    if (p.sameNoteAssign == static_cast<uint8_t> (xg::SameNoteAssign::Single))
+                    {
+                        if (activeNoteInstances[index][static_cast<size_t> (noteNumber)] > 0)
+                        {
+                            fluid_synth_noteoff (activeSynth->synth, channel, noteNumber);
+                            for (size_t s = 0; s < numAuxDrumChannels; ++s)
+                            {
+                                if (auxDrumSlots[s].active && auxDrumSlots[s].sourceChannel == channel && auxDrumSlots[s].noteNumber == noteNumber)
+                                    fluid_synth_noteoff (activeSynth->synth, numMidiChannels + static_cast<int> (s), noteNumber);
+                            }
+                            activeNoteInstances[index][static_cast<size_t> (noteNumber)]--;
+                            const auto curCnt = channelActiveVoiceCount[index].load (std::memory_order_relaxed);
+                            if (curCnt > 0)
+                                channelActiveVoiceCount[index].store (curCnt - 1, std::memory_order_relaxed);
+                        }
+                    }
+                    ensureElementReserveProtected (channel);
+                }
+
+                activeNoteInstances[index][static_cast<size_t> (noteNumber)]++;
+                channelActiveVoiceCount[index].fetch_add (1, std::memory_order_relaxed);
+
                 if (gsMode)
                 {
                     const auto& setup = (gsPart == gs::PartMode::Drum2) ? gsDrumSetup2 : gsDrumSetup1;
@@ -3620,10 +3859,32 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
                 const auto transpose = systemParameters.transpose - 64;
                 const auto shift = p.noteShift - 64;
                 effectiveNote = juce::jlimit (0, 127, noteNumber + transpose + shift);
+
+                if (activeMode == ActiveMode::XG)
+                {
+                    if (p.sameNoteAssign == static_cast<uint8_t> (xg::SameNoteAssign::Single)
+                        || p.sameNoteAssign == static_cast<uint8_t> (xg::SameNoteAssign::Inst))
+                    {
+                        if (juce::isPositiveAndBelow (noteNumber, 128) && activeNoteInstances[index][static_cast<size_t> (noteNumber)] > 0)
+                        {
+                            const auto prevTransNote = activeNoteTransposition[index][static_cast<size_t> (noteNumber)];
+                            fluid_synth_noteoff (activeSynth->synth, channel, prevTransNote);
+                            activeNoteInstances[index][static_cast<size_t> (noteNumber)]--;
+                            const auto curCnt = channelActiveVoiceCount[index].load (std::memory_order_relaxed);
+                            if (curCnt > 0)
+                                channelActiveVoiceCount[index].store (curCnt - 1, std::memory_order_relaxed);
+                        }
+                    }
+                    ensureElementReserveProtected (channel);
+                }
             }
 
             if (juce::isPositiveAndBelow (noteNumber, 128))
+            {
                 activeNoteTransposition[index][static_cast<size_t> (noteNumber)] = static_cast<uint8_t> (effectiveNote);
+                activeNoteInstances[index][static_cast<size_t> (noteNumber)]++;
+                channelActiveVoiceCount[index].fetch_add (1, std::memory_order_relaxed);
+            }
 
             std::array<fluid_voice_t*, 256> voiceBuf {};
             fluid_synth_get_voicelist (activeSynth->synth, voiceBuf.data(), static_cast<int> (voiceBuf.size()), -1);
@@ -3658,6 +3919,16 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
         {
             const auto noteNumber = message.getNoteNumber();
             const auto index = static_cast<size_t> (channel);
+
+            if (juce::isPositiveAndBelow (noteNumber, 128))
+            {
+                if (activeNoteInstances[index][static_cast<size_t> (noteNumber)] > 0)
+                    activeNoteInstances[index][static_cast<size_t> (noteNumber)]--;
+                const auto curVoices = channelActiveVoiceCount[index].load (std::memory_order_relaxed);
+                if (curVoices > 0)
+                    channelActiveVoiceCount[index].store (curVoices - 1, std::memory_order_relaxed);
+            }
+
             const auto partModeRaw = channelPartMode[index].load (std::memory_order_acquire);
             const auto msb = channelBankMsb[index].load (std::memory_order_acquire);
             const auto partMode = static_cast<xg::PartMode> (partModeRaw);
@@ -3720,6 +3991,9 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
 
         if (message.isAllNotesOff())
         {
+            activeNoteInstances[index].fill (0);
+            channelActiveVoiceCount[index].store (0, std::memory_order_release);
+
             if (activeSynth != nullptr)
             {
                 fluid_synth_all_notes_off (activeSynth->synth, channel);
@@ -3734,6 +4008,9 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
 
         if (message.isAllSoundOff())
         {
+            activeNoteInstances[index].fill (0);
+            channelActiveVoiceCount[index].store (0, std::memory_order_release);
+
             if (activeSynth != nullptr)
                 fluid_synth_all_sounds_off (activeSynth->synth, channel);
             return;
@@ -3745,6 +4022,9 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
         // the channel routing stable and only perform the required cleanup.
         if (controller >= 124 && controller <= 127)
         {
+            activeNoteInstances[index].fill (0);
+            channelActiveVoiceCount[index].store (0, std::memory_order_release);
+
             if (activeSynth != nullptr)
                 fluid_synth_all_notes_off (activeSynth->synth, channel);
 
@@ -3767,6 +4047,9 @@ void FluidSynthEngine::handleMidiMessage (const juce::MidiMessage& message) noex
 
         if (message.isResetAllControllers())
         {
+            activeNoteInstances[index].fill (0);
+            channelActiveVoiceCount[index].store (0, std::memory_order_release);
+
             const auto xgActive = isXgModeActive.load (std::memory_order_acquire);
             channelVolume[index].store (xgActive ? xg::defaultVolume : 127, std::memory_order_release);
             channelPan[index].store (xg::defaultPan, std::memory_order_release);

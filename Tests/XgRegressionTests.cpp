@@ -676,6 +676,227 @@ void testS02_U03_SubtypesAndParameters11To16()
     logTestResult ("Distortion LSB 0x02 stored as currentTypeLsb", proc.getCurrentTypeLsb() == 0x02);
 }
 
+// =============================================================================
+// TEST-E07: Tone Fallback Strategy and Silent Voice Processing (TASK-301)
+// =============================================================================
+void testE07_ToneFallbackAndSilentVoice()
+{
+    std::cout << "\n=== TEST-E07: Tone Fallback Strategy and Silent Voice Processing ===" << std::endl;
+
+    FluidSynthEngine engine;
+    engine.prepare (44100.0, 512);
+
+    // Initialize XG System On
+    const uint8_t xgOn[] = { 0xF0, 0x43, 0x10, 0x4C, 0x00, 0x00, 0x7E, 0x00, 0xF7 };
+    engine.handleSysExForTest (xgOn, sizeof (xgOn));
+
+    // Load test soundfont
+    const juce::File sfFile ("/Volumes/proj/gmsynth/GMSynth/external/fluidsynth/sf2/VintageDreamsWaves-v2.sf2");
+    if (sfFile.existsAsFile())
+    {
+        engine.loadSoundFont (sfFile);
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        engine.processBlock (buffer, midi, nullptr, 0);
+    }
+
+    // 1. SFX Bank (MSB 0x40 = 64) unmapped voice -> Silent Voice
+    // Send Bank MSB 64, LSB 0, PC 127 to Channel 1 (Part 0)
+    juce::AudioBuffer<float> buf (2, 512);
+    juce::MidiBuffer midi;
+    midi.addEvent (juce::MidiMessage::controllerEvent (1, 0, 64), 0);
+    midi.addEvent (juce::MidiMessage::controllerEvent (1, 32, 0), 1);
+    midi.addEvent (juce::MidiMessage::programChange (1, 127), 2);
+    engine.processBlock (buf, midi, nullptr, 0);
+
+    logTestResult ("SFX Bank unmapped voice sets silent voice", engine.isChannelSilentVoiceForTest (0) == true);
+
+    // 2. Note-on during silent voice does not trigger sound/active voice
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
+    engine.processBlock (buf, midi, nullptr, 0);
+    logTestResult ("Silent voice does not produce active voices", engine.getPartActiveVoiceCountForTest (0) == 0);
+
+    // 3. Valid Program Change clears silent voice and restores playability
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::controllerEvent (1, 0, 0), 0);
+    midi.addEvent (juce::MidiMessage::controllerEvent (1, 32, 0), 1);
+    midi.addEvent (juce::MidiMessage::programChange (1, 0), 2);
+    engine.processBlock (buf, midi, nullptr, 0);
+    logTestResult ("Valid program clears silent voice", engine.isChannelSilentVoiceForTest (0) == false);
+
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
+    engine.processBlock (buf, midi, nullptr, 0);
+    logTestResult ("Normal voice produces active voice after recovery", engine.getPartActiveVoiceCountForTest (0) > 0);
+
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::noteOff (1, 60, (juce::uint8) 0), 0);
+    engine.processBlock (buf, midi, nullptr, 0);
+    logTestResult ("Voice terminates after note off", engine.getPartActiveVoiceCountForTest (0) == 0);
+
+    // 4. Non-zero MSB (e.g. MSB 32) unmapped voice -> Silent Voice
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::controllerEvent (2, 0, 32), 0);
+    midi.addEvent (juce::MidiMessage::controllerEvent (2, 32, 0), 1);
+    midi.addEvent (juce::MidiMessage::programChange (2, 0), 2);
+    engine.processBlock (buf, midi, nullptr, 0);
+    logTestResult ("Non-zero MSB unmapped voice sets silent voice", engine.isChannelSilentVoiceForTest (1) == true);
+
+    // 5. Proxy Bank (MSB 0x60 = 96) falls back to Normal Bank 0
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::controllerEvent (3, 0, 0x60), 0);
+    midi.addEvent (juce::MidiMessage::controllerEvent (3, 32, 0), 1);
+    midi.addEvent (juce::MidiMessage::programChange (3, 0), 2);
+    engine.processBlock (buf, midi, nullptr, 0);
+    logTestResult ("Proxy bank falls back to Bank 0 and remains playable", engine.isChannelSilentVoiceForTest (2) == false);
+
+    // 6. Normal Bank (MSB 0x00) unsupported LSB retains last valid melodic LSB
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::controllerEvent (4, 0, 0), 0);
+    midi.addEvent (juce::MidiMessage::controllerEvent (4, 32, 0), 1);
+    midi.addEvent (juce::MidiMessage::programChange (4, 0), 2);
+    engine.processBlock (buf, midi, nullptr, 0);
+    assert (engine.getLastValidMelodicLsbForTest (3) == 0);
+
+    // Send unsupported LSB bank (e.g. 99)
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::controllerEvent (4, 0, 0), 0);
+    midi.addEvent (juce::MidiMessage::controllerEvent (4, 32, 99), 1);
+    midi.addEvent (juce::MidiMessage::programChange (4, 0), 2);
+    engine.processBlock (buf, midi, nullptr, 0);
+    logTestResult ("Unsupported LSB bank retains last valid melodic LSB", engine.getLastValidMelodicLsbForTest (3) == 0);
+    logTestResult ("Unsupported LSB voice remains playable via fallback", engine.isChannelSilentVoiceForTest (3) == false);
+
+    // 7. Drum Kit (MSB 0x7F) unmapped kit maintains drum playability without overwrite
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::controllerEvent (10, 0, 127), 0);
+    midi.addEvent (juce::MidiMessage::controllerEvent (10, 32, 0), 1);
+    midi.addEvent (juce::MidiMessage::programChange (10, 127), 2);
+    engine.processBlock (buf, midi, nullptr, 0);
+    logTestResult ("Unsupported drum kit maintains drum playability", engine.isChannelSilentVoiceForTest (9) == false);
+}
+
+// =============================================================================
+// TEST-E06: Multi Part Routing, Same Note Assign, Element Reserve (TASK-302)
+// =============================================================================
+void testE06_MultiPartRoutingSameNoteAssignElementReserve()
+{
+    std::cout << "\n=== TEST-E06: Multi Part Routing, Same Note Assign, Element Reserve ===" << std::endl;
+
+    FluidSynthEngine engine;
+    engine.prepare (44100.0, 512);
+
+    // Initialize XG System On
+    const uint8_t xgOn[] = { 0xF0, 0x43, 0x10, 0x4C, 0x00, 0x00, 0x7E, 0x00, 0xF7 };
+    engine.handleSysExForTest (xgOn, sizeof (xgOn));
+
+    // Load test soundfont
+    const juce::File sfFile ("/Volumes/proj/gmsynth/GMSynth/external/fluidsynth/sf2/VintageDreamsWaves-v2.sf2");
+    if (sfFile.existsAsFile())
+    {
+        engine.loadSoundFont (sfFile);
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::MidiBuffer midi;
+        engine.processBlock (buffer, midi, nullptr, 0);
+    }
+
+    // 1. Multi Part Receive Channel Routing (Layering)
+    // Set Part 2 (channel index 1) Rcv Channel to 0 (MIDI ch 1)
+    // SysEx: F0 43 10 4C 08 01 04 00 F7
+    const uint8_t setPart2Rcv0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x01, 0x04, 0x00, 0xF7 };
+    engine.handleSysExForTest (setPart2Rcv0, sizeof (setPart2Rcv0));
+    logTestResult ("Part 2 Rcv Channel set to 0", engine.getPartRcvChannelForTest (1) == 0);
+
+    // Send Note On to MIDI ch 1 -> Both Part 1 (ch 0) and Part 2 (ch 1) should sound (layered)
+    juce::AudioBuffer<float> buf (2, 512);
+    juce::MidiBuffer midi;
+    midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 0);
+    engine.processBlock (buf, midi, nullptr, 0);
+
+    logTestResult ("Layered parts both receive Note On",
+                   engine.getPartActiveVoiceCountForTest (0) > 0 && engine.getPartActiveVoiceCountForTest (1) > 0);
+
+    // Send Note Off to MIDI ch 1 -> Both should stop
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::noteOff (1, 60, (juce::uint8) 0), 0);
+    engine.processBlock (buf, midi, nullptr, 0);
+    logTestResult ("Layered parts both receive Note Off",
+                   engine.getPartActiveVoiceCountForTest (0) == 0 && engine.getPartActiveVoiceCountForTest (1) == 0);
+
+    // Restore Part 2 Rcv Channel back to 1
+    const uint8_t restorePart2Rcv1[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x01, 0x04, 0x01, 0xF7 };
+    engine.handleSysExForTest (restorePart2Rcv1, sizeof (restorePart2Rcv1));
+
+    // 2. Receive Channel OFF (0x7F)
+    // Set Part 3 (channel index 2) Rcv Channel to 0x7F (OFF)
+    // SysEx: F0 43 10 4C 08 02 04 7F F7
+    const uint8_t setPart3RcvOff[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x02, 0x04, 0x7F, 0xF7 };
+    engine.handleSysExForTest (setPart3RcvOff, sizeof (setPart3RcvOff));
+    logTestResult ("Part 3 Rcv Channel set to 0x7F (OFF)", engine.getPartRcvChannelForTest (2) == 0x7F);
+
+    // Send Note On to MIDI ch 3 (normal Part 3 channel)
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::noteOn (3, 60, (juce::uint8) 100), 0);
+    engine.processBlock (buf, midi, nullptr, 0);
+    logTestResult ("Part with Rcv Channel OFF ignores Note On", engine.getPartActiveVoiceCountForTest (2) == 0);
+
+    // 3. Same Note Assign: Single (0) vs Multi (1)
+    // Set Part 1 (index 0) Same Note Assign to Single (0)
+    // SysEx: F0 43 10 4C 08 00 06 00 F7 (Param 0x06 = Same Note Assign)
+    const uint8_t setPart1Single[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x06, 0x00, 0xF7 };
+    engine.handleSysExForTest (setPart1Single, sizeof (setPart1Single));
+    logTestResult ("Part 1 Same Note Assign set to Single", engine.getPartSameNoteAssignForTest (0) == xg::SameNoteAssign::Single);
+
+    // Note On twice on Note 64 (Single mode should cut preceding note)
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::noteOn (1, 64, (juce::uint8) 100), 0);
+    engine.processBlock (buf, midi, nullptr, 0);
+
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::noteOn (1, 64, (juce::uint8) 100), 0);
+    engine.processBlock (buf, midi, nullptr, 0);
+    logTestResult ("Single assign cuts preceding note (voice count = 1)", engine.getPartActiveVoiceCountForTest (0) == 1);
+
+    // Clear notes on ch 1
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::allNotesOff (1), 0);
+    engine.processBlock (buf, midi, nullptr, 0);
+
+    // Set Part 4 (index 3) Same Note Assign to Multi (1)
+    // SysEx: F0 43 10 4C 08 03 06 01 F7
+    const uint8_t setPart4Multi[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x03, 0x06, 0x01, 0xF7 };
+    engine.handleSysExForTest (setPart4Multi, sizeof (setPart4Multi));
+    logTestResult ("Part 4 Same Note Assign set to Multi", engine.getPartSameNoteAssignForTest (3) == xg::SameNoteAssign::Multi);
+
+    // Note On twice on Note 64 on ch 4 (Multi mode should layer duplicate note)
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::noteOn (4, 64, (juce::uint8) 100), 0);
+    engine.processBlock (buf, midi, nullptr, 0);
+
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::noteOn (4, 64, (juce::uint8) 100), 0);
+    engine.processBlock (buf, midi, nullptr, 0);
+    logTestResult ("Multi assign layers duplicate note (voice count = 2)", engine.getPartActiveVoiceCountForTest (3) == 2);
+
+    midi.clear();
+    midi.addEvent (juce::MidiMessage::allNotesOff (4), 0);
+    engine.processBlock (buf, midi, nullptr, 0);
+
+    // 4. Element Reserve parameter check
+    // Set Part 1 Element Reserve to 10
+    // SysEx: F0 43 10 4C 08 00 00 0A F7 (Param 0x00 = Element Reserve)
+    const uint8_t setPart1Reserve10[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x00, 0x00, 0x0A, 0xF7 };
+    engine.handleSysExForTest (setPart1Reserve10, sizeof (setPart1Reserve10));
+    logTestResult ("Part 1 Element Reserve set to 10", engine.getPartElementReserveForTest (0) == 10);
+
+    // Set Part 2 Element Reserve to 0
+    // SysEx: F0 43 10 4C 08 01 00 00 F7
+    const uint8_t setPart2Reserve0[] = { 0xF0, 0x43, 0x10, 0x4C, 0x08, 0x01, 0x00, 0x00, 0xF7 };
+    engine.handleSysExForTest (setPart2Reserve0, sizeof (setPart2Reserve0));
+    logTestResult ("Part 2 Element Reserve set to 0", engine.getPartElementReserveForTest (1) == 0);
+}
+
 int main()
 {
     std::cout << "=======================================================" << std::endl;
@@ -696,6 +917,10 @@ int main()
     testS01_PhysicalMappingReverbChorus();
     testU02_EssentialVariationTypes();
     testS02_U03_SubtypesAndParameters11To16();
+
+    // Phase 3 Tests
+    testE07_ToneFallbackAndSilentVoice();
+    testE06_MultiPartRoutingSameNoteAssignElementReserve();
 
     std::cout << "\n=======================================================" << std::endl;
     std::cout << "  TOTAL: " << (gPassedTests + gFailedTests)

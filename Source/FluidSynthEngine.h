@@ -9,6 +9,7 @@
 #include <array>
 #include <atomic>
 #include <memory>
+#include <unordered_set>
 #include <vector>
 
 class FluidSynthEngine
@@ -126,6 +127,42 @@ public:
         }
     }
 
+    bool isChannelSilentVoiceForTest (int channel) const noexcept
+    {
+        if (! juce::isPositiveAndBelow (channel, static_cast<int> (numMidiChannels))) return false;
+        return channelIsSilentVoice[static_cast<size_t> (channel)].load (std::memory_order_acquire);
+    }
+    uint8_t getLastValidMelodicLsbForTest (int channel) const noexcept
+    {
+        if (! juce::isPositiveAndBelow (channel, static_cast<int> (numMidiChannels))) return 0;
+        return channelLastValidMelodicLsb[static_cast<size_t> (channel)].load (std::memory_order_acquire);
+    }
+    int getPartRcvChannelForTest (int part) const noexcept
+    {
+        if (! juce::isPositiveAndBelow (part, static_cast<int> (numMidiChannels))) return 0x7F;
+        return partParameters[static_cast<size_t> (part)].rcvChannel;
+    }
+    xg::SameNoteAssign getPartSameNoteAssignForTest (int part) const noexcept
+    {
+        if (! juce::isPositiveAndBelow (part, static_cast<int> (numMidiChannels))) return xg::SameNoteAssign::Single;
+        return static_cast<xg::SameNoteAssign> (partParameters[static_cast<size_t> (part)].sameNoteAssign);
+    }
+    int getPartElementReserveForTest (int part) const noexcept
+    {
+        if (! juce::isPositiveAndBelow (part, static_cast<int> (numMidiChannels))) return 0;
+        return partParameters[static_cast<size_t> (part)].elementReserve;
+    }
+    int getPartActiveVoiceCountForTest (int part) const noexcept
+    {
+        if (! juce::isPositiveAndBelow (part, static_cast<int> (numMidiChannels))) return 0;
+        return channelActiveVoiceCount[static_cast<size_t> (part)].load (std::memory_order_acquire);
+    }
+    bool isBankAvailableForTest (int bank) const noexcept
+    {
+        if (activeSynth == nullptr) return false;
+        return activeSynth->availableBanks.find (bank) != activeSynth->availableBanks.end();
+    }
+
 private:
     struct PresetLocation
     {
@@ -139,6 +176,7 @@ private:
         fluid_settings_t* settings = nullptr;
         fluid_synth_t* synth = nullptr;
 
+        std::unordered_set<int> availableBanks;
         std::array<std::vector<PresetLocation>, 128> presetsByProgram;
         std::array<std::vector<PresetLocation>, 128> percussionPresetsByProgram;
         PresetLocation lowestPreset;
@@ -227,20 +265,22 @@ private:
     static void destroyChange (SynthChange* change) noexcept;
     static const PresetLocation* findPresetInBank (const std::vector<PresetLocation>& presets,
                                                    int bank) noexcept;
-    static void applyProgramChangeToSynth (SynthInstance& instance,
-                                           int channel,
-                                           int program,
-                                           int requestedBank,
-                                           int bankMsb,
-                                           int bankLsb,
-                                           ActiveMode activeMode,
-                                           bool isPercussionChannel) noexcept;
+    void applyProgramChangeToSynth (SynthInstance& instance,
+                                   int channel,
+                                   int program,
+                                   int requestedBank,
+                                   int bankMsb,
+                                   int bankLsb,
+                                   ActiveMode activeMode,
+                                   bool isPercussionChannel) noexcept;
 
     void requestChange (SynthChange* change);
     void adoptPendingChange() noexcept;
     void initializeSynthChannelState (SynthInstance& instance) noexcept;
     void applyChannelState() noexcept;
     void handleMidiMessage (const juce::MidiMessage& message) noexcept;
+    void dispatchMidiMessageToPart (int part, const juce::MidiMessage& message) noexcept;
+    void ensureElementReserveProtected (int targetPart) noexcept;
     void handleProgramChange (int channel, int program) noexcept;
     void handleSysEx (const juce::uint8* data, int numBytes) noexcept;
     void resetChannelState (int channel) noexcept;
@@ -299,6 +339,10 @@ private:
     std::array<std::atomic<bool>, numMidiChannels> drumPartProtectMode;
     std::array<std::atomic<int>, numMidiChannels> channelProgram;
     std::array<std::atomic<uint8_t>, numMidiChannels> channelModulation;
+    std::array<std::atomic<bool>, numMidiChannels> channelIsSilentVoice;
+    std::array<std::atomic<uint8_t>, numMidiChannels> channelLastValidMelodicLsb;
+    std::array<std::array<int, 128>, numMidiChannels> activeNoteInstances {};
+    std::array<std::atomic<int>, numMidiChannels> channelActiveVoiceCount;
     std::atomic<float> masterGain { 0.8f };
 
     xg::SystemParameters systemParameters;

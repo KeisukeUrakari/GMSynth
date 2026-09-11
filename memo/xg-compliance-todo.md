@@ -27,9 +27,9 @@
 
 - [x] **Phase 1: 致命的・高優先度の誤り修正（定数・初期値・Send換算）** （全タスク完了）
 - [x] **Phase 2: エフェクトパラメータ体系・初期化とDSP処理の刷新** （全タスク完了）
-- [ ] **Phase 3: 音色フォールバックとパート受信制御の適正化**
+- [x] **Phase 3: 音色フォールバックとパート受信制御の適正化** （全タスク完了）
 - [ ] **Phase 4: オプション機能・拡張仕様の整備**
-- [-] **Phase 5: 動作検証・テスト環境の整備** （TASK-501 回帰テスト基盤・Phase 1 & Phase 2検証完了）
+- [-] **Phase 5: 動作検証・テスト環境の整備** （TASK-501 回帰テスト基盤・Phase 1〜3 全107項目検証完了）
 
 ---
 
@@ -173,7 +173,7 @@
 
 ## Phase 3: 音色フォールバックとパート受信制御の適正化
 
-### [ ] TASK-301: バンクの性質に応じた音色フォールバックの実装 【E07】
+### [x] TASK-301: バンクの性質に応じた音色フォールバックの実装 【E07】
 - **対象**: `Source/FluidSynthEngine.cpp`: `applyProgramChangeToSynth` 内の探索ロジックおよびBank/Programの状態管理
 - **仕様書**: [spec.pdf](../specific/spec.pdf) p.5〜7、[xgmap.pdf](../specific/xgmap.pdf) p.117
 - **内容**:
@@ -186,8 +186,15 @@
     - Proxyバンク（MSB `60H`〜`6FH`）: 未収録音色は規定に従いMSB `00H`へ代替する。Normalの規則を全非ゼロMSBに適用しない。
     - ドラムキット（MSB `7FH`）: 該当するキットがないProgram Changeを受信した場合は無視し、従前のキットを維持する（Standard Kitへの強制上書きを行わない）。
 - **完了条件（DoD）**: テスト用プリセット構成で、Normalの未対応LSB維持・部分対応バンクの欠落Program補完、Non-proxy/SFXの無発音、Proxyの代替、未対応ドラムProgramの維持を別々に検証する。無発音指定後のNote Onが代替GM音色を鳴らさず、次の有効な指定で復帰することも確認する。
+- **対応状況**: **完了**。SoundFontロード時に全バンク番号をキャッシュ（`SynthInstance::availableBanks`）。`applyProgramChangeToSynth` にて XG モード専用のフォールバック戦略を実装:
+  - SFXバンク（MSB `0x40`）: 未収録音色は Bank 0 へフォールバックせず無発音（`isSilentVoice = true`）。
+  - 非ゼロMSB（MSB `0x01`〜`0x7E`）: 未収録音色は無発音（`isSilentVoice = true`）。
+  - Proxyバンク（MSB `0x60`〜`0x6F`）: 未収録音色は規定通り MSB `00H`（Normal Bank 0）へ代替。
+  - Normalバンク（MSB `0x00`）: 未対応LSBバンク指定時は前回有効LSB（`channelLastValidMelodicLsb`）を維持。部分対応バンク内の欠落Programは Bank 0 の同Programで補完。
+  - ドラムキット（MSB `0x7F`）: 該当キットが存在しないProgram Changeは無視し、従前キットを維持。
+  - 無発音状態のパートへの Note On は `fluid_synth_noteon` を呼ばず即時スキップ。有効音色の Program Change 受信時に即時通常発音へ復帰。TEST-E07にて全項目検証完了。
 
-### [ ] TASK-302: Multi Part 設定の受信制御・ルーティング接続 【E06】
+### [x] TASK-302: Multi Part 設定の受信制御・ルーティング接続 【E06】
 - **対象**: `Source/FluidSynthEngine.cpp`: MIDIメッセージ受信ループおよびパート処理
 - **仕様書**: [xgparameterchangetable.pdf](../specific/xgparameterchangetable.pdf) p.43〜44
 - **内容**:
@@ -195,6 +202,10 @@
   - `Same Note Assign`: 同一ノート多重受信時の発音方式（0: Single / 1: Multi / 2: INST〈ドラムのインストゥルメント別設定〉）の動作を接続する。
   - `Element Reserve`: パート別の発音数予約を発音数管理・ボイススティーリング制御へ反映する。設計の検討や値の保持だけでは完了としない。
 - **完了条件（DoD）**: 受信チャンネルの変更・OFF、同じMIDIチャンネルを受信する複数パート、Same Note Assignの全3値が発音に反映される。発音上限に達するケースでElement Reserveがボイス選択へ反映されることを確認する。受信OFFを既発音ボイスの即時消音と同一視しない。
+- **対応状況**: **完了**。
+  - `Rcv Channel`: `handleMidiMessage` で XG モード時に `partParameters[p].rcvChannel == midiChannel` を満たす全Partへメッセージを配信する `dispatchMidiMessageToPart` を導入。同一MIDIチャンネルに割り当てられた複数Partのレイヤー同時発音、および `0x7F` (OFF) 設定時のNote On受信無視を実現（既発音ボイスは即時消音せず自然終了）。
+  - `Same Note Assign`: パートごとの同一ノート重複度（`activeNoteInstances`）を追跡。`Single (0)` およびメロディの `Inst (2)` では同一ノート再受信時に先行音を `fluid_synth_noteoff` でカットして再発音。`Multi (1)` では重畳発音を許可。
+  - `Element Reserve`: 各パートのアクティブボイス数（`channelActiveVoiceCount`）を管理。発音数逼迫時に `channelActiveVoiceCount <= elementReserve` のパートを保護し、予約数を超過しているパートから優先的に解放（`ensureElementReserveProtected`）。TEST-E06にて全項目検証完了。
 
 ---
 
