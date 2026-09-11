@@ -38,10 +38,12 @@
 結果:
 
 ```text
-TOTAL: 402 | PASSED: 402 | FAILED: 0
+TOTAL: 421 | PASSED: 421 | FAILED: 0
 ```
 
 この結果は既存アサーションの成功を示すものであり、全仕様項目の一致を示すものではない。以下の不一致には、現在のテストでは検出できないものが含まれる。
+
+2026-09-12のCC121修正後に再実行した結果。追加したCC121関連19アサーションがすべて成功し、修正前に失敗していた9件が解消した。
 
 ## 機能別の対応状況
 
@@ -54,7 +56,7 @@ TOTAL: 402 | PASSED: 402 | FAILED: 0
 | Master Attenuator                                | 一部対応                 | 値を保存するが、マスターゲイン計算に使用していない                             |
 | Bank Select・Program Change・音色代替            | 対応しているが誤りがある | SFX判定の定数取り違え。ドラムの従前キット維持も保証できない                    |
 | XG Voice／Drum Voiceの収録                       | 一部対応                 | 外部SoundFontに依存。仕様音色一覧との全件一致は未確認                          |
-| Reset All Controllers（CC121）                   | 対応しているが誤りがある | 仕様のリセット対象にないVolumeとPanまで初期化                                  |
+| Reset All Controllers（CC121）                   | 一部対応 | Volume／Panを初期化する誤りは修正・検証済み。Portamento解除も確認。CC121全体の仕様準拠は未検証 |
 | パート別フィルター・EG・ビブラート・NRPN         | 一部対応                 | 主要項目を実装。音響特性・全値域の仕様一致は未確認                             |
 | MW／Bend／CAT／AC1／AC2制御                      | 一部対応                 | 主要な変調先への反映あり                                                       |
 | Poly AftertouchのXG制御先設定                    | 一部対応                 | PAT設定を保存するが、受信時はFluidSynthへのキー圧転送のみ                      |
@@ -86,11 +88,22 @@ TOTAL: 402 | PASSED: 402 | FAILED: 0
 
 ## 特に修正が必要な不一致
 
-### 1. CC121が音量とパンを変更する
+### 1. CC121が音量とパンを変更する【修正・検証済み】
 
 `spec.pdf` p.14のリセット対象はPitch Bend、Modulation、Expression、各ペダル等である。
 
-`Source/FluidSynthEngine.cpp`の`dispatchMidiMessageToPart`内、`message.isResetAllControllers()`分岐はVolumeとPanも初期化する。曲中のCC121でミックスが変わる。
+修正前は、`Source/FluidSynthEngine.cpp`の`dispatchMidiMessageToPart`内、`message.isResetAllControllers()`分岐がVolumeとPanも初期化し、曲中のCC121でミックスが変わっていた。
+
+2026-09-12に、同分岐からVolume／Panの初期化と`channelStateNeedsApply = true`を削除した修正を確認した。転送先のFluidSynthの`fluid_channel_init_ctrl(chan, 1)`もVolume／Panをリセット対象から除外している。
+
+`Tests/XgRegressionTests.cpp`の`testCc121_PreservesVolumeAndPan`により、以下を確認した。
+
+- Volume／Panの組合せ `(37, 19)`、`(0, 1)`、`(127, 127)`がCC121後も保持される。
+- 次の処理ブロックでもVolume／Panが保持される。
+- 別チャンネルのVolume／Panに影響しない。
+- リセット対象のPortamentoは解除され、CC121自体を無視する修正ではない。
+
+本項の不具合は解消済み。ただし、この検証はVolume／Pan保持の修正を対象とし、CC121の全リセット対象・発音中の状態管理等の仕様準拠を保証するものではない。そのため機能別分類は「一部対応」とする。
 
 ### 2. Amp Simulatorのパラメータ配置が異なる
 

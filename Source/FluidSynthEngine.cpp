@@ -4241,16 +4241,12 @@ void FluidSynthEngine::dispatchMidiMessageToPart (int channel, const juce::MidiM
             activeNoteInstances[index].fill (0);
             channelActiveVoiceCount[index].store (0, std::memory_order_release);
 
-            const auto xgActive = isXgModeActive.load (std::memory_order_acquire);
-            channelVolume[index].store (xgActive ? xg::defaultVolume : 127, std::memory_order_release);
-            channelPan[index].store (xg::defaultPan, std::memory_order_release);
             channelModulation[index].store (0, std::memory_order_release);
             nrpnStates[index].reset();
             resetChannelControllers (channel);
             updateChannelModulation (channel);
             if (activeSynth != nullptr)
                 fluid_synth_cc (activeSynth->synth, channel, controller, value);
-            channelStateNeedsApply = true;
             return;
         }
 

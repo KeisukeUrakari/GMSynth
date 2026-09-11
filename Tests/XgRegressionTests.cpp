@@ -2339,6 +2339,65 @@ void testE06_MultiPartRoutingSameNoteAssignElementReserve()
     logTestResult ("Part 2 Element Reserve set to 0", engine.getPartElementReserveForTest (1) == 0);
 }
 
+// spec.pdf p.14: CC121 resets modulation, expression and pedals, but
+// Volume (CC7) and Pan (CC10) are not reset targets.
+void testCc121_PreservesVolumeAndPan()
+{
+    std::cout << "\n=== CC121: Preserve Volume and Pan ===" << std::endl;
+    FluidSynthEngine engine;
+    engine.prepare (44100.0, 512);
+    const juce::File sfFile = juce::File::getCurrentWorkingDirectory()
+        .getChildFile ("external/fluidsynth/sf2/VintageDreamsWaves-v2.sf2");
+    logTestResult ("CC121 fixture SoundFont exists", sfFile.existsAsFile());
+    if (! sfFile.existsAsFile())
+        return;
+    engine.loadSoundFont (sfFile);
+    juce::AudioBuffer<float> buffer (2, 512);
+    juce::MidiBuffer midi;
+    engine.processBlock (buffer, midi, nullptr, 0);
+    const uint8_t xgOn[] = { 0xF0,0x43,0x10,0x4C,0x00,0x00,0x7E,0x00,0xF7 };
+    engine.handleSysExForTest (xgOn, sizeof (xgOn));
+
+    struct Settings { int volume; int pan; };
+    const std::array<Settings, 3> settings {{{37, 19}, {0, 1}, {127, 127}}};
+    for (const auto& setting : settings)
+    {
+        const auto label = std::string ("CC121 volume=") + std::to_string (setting.volume)
+                         + " pan=" + std::to_string (setting.pan);
+        midi.clear();
+        midi.addEvent (juce::MidiMessage::controllerEvent (1, 7, setting.volume), 0);
+        midi.addEvent (juce::MidiMessage::controllerEvent (1, 10, setting.pan), 1);
+        midi.addEvent (juce::MidiMessage::controllerEvent (1, 65, 127), 2);
+        // An unrelated channel must retain its own mix as well.
+        midi.addEvent (juce::MidiMessage::controllerEvent (2, 7, 53), 3);
+        midi.addEvent (juce::MidiMessage::controllerEvent (2, 10, 103), 4);
+        engine.processBlock (buffer, midi, nullptr, 0);
+        const auto before = engine.getChannelState (0);
+        logTestResult (label + " setup reached MIDI receive path",
+                       before.volume == setting.volume && before.pan == setting.pan
+                       && engine.getPartParameters (0).portamentoSwitch != 0);
+
+        midi.clear();
+        midi.addEvent (juce::MidiMessage::controllerEvent (1, 121, 0), 0);
+        engine.processBlock (buffer, midi, nullptr, 0);
+        const auto after = engine.getChannelState (0);
+        logTestResult (label + " preserves CC7", after.volume == setting.volume);
+        logTestResult (label + " preserves CC10", after.pan == setting.pan);
+        logTestResult (label + " resets portamento (CC121 is not ignored)",
+                       engine.getPartParameters (0).portamentoSwitch == 0);
+        const auto other = engine.getChannelState (1);
+        logTestResult (label + " preserves unrelated channel",
+                       other.volume == 53 && other.pan == 103);
+
+        // Catch a deferred applyChannelState overwrite in the following block.
+        midi.clear();
+        engine.processBlock (buffer, midi, nullptr, 0);
+        const auto next = engine.getChannelState (0);
+        logTestResult (label + " remains unchanged in next block",
+                       next.volume == setting.volume && next.pan == setting.pan);
+    }
+}
+
 int main()
 {
     std::cout << "=======================================================" << std::endl;
@@ -2349,6 +2408,7 @@ int main()
     testE01_VariationTypeMsbConstants();
     testE03_EffectDefaultTables();
     testE04_ZeroValueHandling();
+    testCc121_PreservesVolumeAndPan();
     testE05_EffectSendConversion();
     testE09_MultiEqPresets();
     testE10_MultiPartResetValues();
