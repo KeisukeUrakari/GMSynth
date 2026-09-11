@@ -2,6 +2,8 @@
 
 検証日: 2026-09-11
 
+配置された仕様書による再検証済み。判定の補足・変更は[xg-compliance-verification.md](xg-compliance-verification.md)を参照。
+
 ## 結論
 
 現在の実装はXGの部分対応であり、規格に沿った動作を保証できる状態ではない。特にVariationの種類番号、種類別パラメータの解釈、音色フォールバックには、XGデータの再生結果を変える誤りがある。
@@ -84,6 +86,8 @@ Delay LCRの具体例:
 
 対応: 種類のMSB/LSBに対応する初期値表を用意し、リセットと種類変更に適用する。
 
+再検証: [efctparamdeflt.pdf](../specific/efctparamdeflt.pdf) p.39に種類別初期値がある。例えばHall 1のパラメータ1〜5は十進数で18, 10, 8, 13, 49。種類変更による詳細設定の初期化は、公式解説[read_aoyama.pdf](../specific/read_aoyama.pdf)の図4-3直前の注意書きでも確認した。初期値表と解説の根拠を区別する。
+
 ### E04: 有効なゼロ値を未指定として扱う【高】
 
 参照: [FluidSynthEngine.cpp](../Source/FluidSynthEngine.cpp)の`updateChorusSettings`、[VariationEffect.cpp](../Source/VariationEffect.cpp)の各パラメータ更新処理。
@@ -132,6 +136,8 @@ F0 43 10 4C 08 00 04 7F F7
 
 対応: Normal、SFX、Drumなどのバンク区分ごとにフォールバックを定義し、未対応キット指定時には選択中のキットを保持する。
 
+再検証による補足: [spec.pdf](../specific/spec.pdf) p.6〜7では、部分対応するバンク内の欠落音色をBank 0の同Programで補うことと、未対応のNormalバンクLSB指定時に前回のメロディーLSBを維持することを区別している。一律Bank 0への代替では後者も満たさない。MSB 01〜7Eの未収録音色は無発音の規定があるが、[xgmap.pdf](../specific/xgmap.pdf)には60〜6FのProxyについてMSB 0への代替規定もあるため、全拡張バンクを一律に無発音へ変更してはいけない。
+
 ### E08: Drums3・4が独立したSetupとして機能しない【中】
 
 参照: [FluidSynthEngine.cpp](../Source/FluidSynthEngine.cpp)、Drum Setup Parameter Change処理と発音時のSetup選択。
@@ -139,6 +145,16 @@ F0 43 10 4C 08 00 04 7F F7
 SysExはSetup 1・2のみ受信する一方、Part ModeではDrums3・4も受け付ける。発音時にはDrums3がSetup 1、Drums4がSetup 2へ割り当てられる。
 
 対応: 対応するSetup数と受け付けるPart Modeの整合を取る。Setup 3・4を追加する場合は独立した状態を持たせる。
+
+再検証による限定: [xgparameterchangetable.pdf](../specific/xgparameterchangetable.pdf) p.47は最低2セット、Setup 3・4はオプションと規定する。2セットしか持たないこと自体は誤りではない。ここでの「誤り」は、未対応のPart Modeを既存Setupに黙って結び付ける実装上の不整合を指す。未対応モードの代替処理について、この箇所だけから一意の規格違反とは断定しない。
+
+### E09: Multi EQプリセット値が不一致【高】
+
+再検証で追加。`MultiEqParameters::setPreset`は独自のゲイン値のみを設定し、周波数・Q・形状を規定のプリセットへ戻さない。JazzのGain1〜5は規定58, 66, 68, 60, 58に対し、実装68, 64, 62, 66, 67。根拠: [efctparamdeflt.pdf](../specific/efctparamdeflt.pdf) p.40。Multi EQはオプションだが、実装済み機能の値の誤りとして扱う。
+
+### E10: Multi Partのリセット値が不一致【高】
+
+再検証で追加。`resetChannelState`と`PartParameters::reset`では、Part 10のPart ModeがDrums1ではなくDrum、Element Reserveが0ではなく2、全PartのRcv Channelが各チャンネル番号ではなく0になる。根拠: [xgparameterchangetable.pdf](../specific/xgparameterchangetable.pdf) p.44。E06の未接続処理と合わせて修正する。
 
 ## 一部簡易対応
 
@@ -169,7 +185,7 @@ Delay、歪み、変調系の処理はあるが、種類別の全パラメータ
 
 SF2のBank/Programによる音色選択はあるが、音色の内容は利用するSoundFontに依存する。任意のSF2をロードする方式だけでは、XGの音色配列・ドラムノート配列・音色特性を保証できない。
 
-特定SoundFontの不適合を確認したわけではない。対応対象のSoundFontとバンク対応表を定め、その内容を別途検証する必要がある。
+全拡張音色の収録や、ヤマハ実機との波形一致を要求するものではない。規定に従った代替も許容される。特定SoundFontの不適合を確認したわけではない。対応対象のSoundFontとバンク対応表を定め、その内容を別途検証する必要がある。
 
 ## 未実装(将来対応)
 
@@ -185,7 +201,7 @@ XGとして判定するのは`43 1n 4C`のParameter Change形式であり、Bulk
 
 VariationとしてのHall、Room、Stage、Plate、Rotary Speaker、EQなどの専用処理がない。未対応番号は原音を通す。なお、Rotary SpeakerなどはE01の番号衝突により別効果になる場合があり、その誤りは先に修正する。
 
-追加対象はXGの必須・オプション区分と製品の対応範囲に基づいて決定する。
+追加対象はXGの必須・オプション区分と製品の対応範囲に基づいて決定する。Effect Mapの色分けと抽出テキストを照合すると、VariationのHall 1/2、Room 1〜3、Stage 1/2、Plate、Rotary Speaker、3-Band/2-Band EQの基本タイプはESSENTIAL側である。これらをすべて任意の将来拡張と扱うのは不適切で、通常のXG対応を目標とする場合は優先して実装する。
 
 ### U03: 保存のみのエフェクトパラメータのDSP反映
 
@@ -197,7 +213,7 @@ Variationのパラメータ11〜16は保存されるが、DSPでは参照され�
 
 ### U04: 独立したDrum Setup 3・4
 
-現在の実体とSysEx受信はSetup 1・2のみ。Setup数を拡張する場合は、E08を解消したうえで状態・受信・発音・リセットを一貫して追加する。
+現在の実体とSysEx受信はSetup 1・2のみ。Setup 3・4は仕様書上オプションなので、必須対応とはしない。Setup数を拡張する場合は、E08を解消したうえで状態・受信・発音・リセットを一貫して追加する。
 
 ## 対応の土台が確認できた項目
 
