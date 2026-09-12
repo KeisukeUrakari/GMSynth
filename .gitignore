@@ -10,6 +10,7 @@
 /Builds/**/*.vst3/
 /Builds/**/*.a
 /Builds/**/*.dSYM/
+/Builds/bin/
 **/xcuserdata/
 **/*.xcuserstate
 
