@@ -76,6 +76,48 @@ xcrun notarytool store-credentials GMSynthNotary \
 
 署名IDやTeam IDなどを変更する場合は、`scripts/macos/config.env.example`をコピーして `scripts/macos/config.env` を作成してください。
 
+## MIDIからWAVへの変換（CUI）
+
+`gmsynth-render` は、標準MIDIファイル1曲を **48 kHz・16 bit PCM・ステレオWAV** にオフライン変換します。オーディオデバイスやDAWは不要です。SoundFontは別途指定してください。
+
+リポジトリのルートでビルドします（macOS、CMake 3.22以降、C++17対応コンパイラが必要）。JUCEとFluidSynthは同梱サブモジュールを使ってビルドするため、このCUIについては事前の `build_fluidsynth.sh` 実行は不要です。
+
+```sh
+cmake -S Tools/Render -B Builds/Render/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+cmake --build Builds/Render/build --target gmsynth-render -j 4
+
+Builds/Render/build/bin/gmsynth-render song.mid --soundfont sound.sf2 --output song.wav
+```
+
+`cmake` がPATHにない場合は `/opt/homebrew/bin/cmake` などの絶対パスで実行してください。
+
+余韻は既定で1小節です。次のどちらか一方で変更できます。小数・0も指定でき、0の場合は余韻とフェードを付けません。
+
+```sh
+Builds/Render/build/bin/gmsynth-render song.mid --soundfont sound.sf2 --output song.wav --tail-bars 2
+Builds/Render/build/bin/gmsynth-render song.mid --soundfont sound.sf2 --output song.wav --tail-seconds 3.5
+```
+
+- 最後のノートオフ、またはサステイン／ソステヌートで保持した最後の音の解放時点から余韻を生成します。音源固有の音の減衰とリバーブも、この時間に含まれます。
+- 余韻の全期間で、エフェクト込みの左右の音声を同じ割合で線形フェードアウトし、最後のサンプルを無音にします。自動ノーマライズはしません。
+- 小節の長さは解放時点のテンポ・拍子で計算し、小節境界には切り上げません。未指定時は120 BPM・4/4なので、1小節は2秒です。
+- 曲頭・曲中の休符は保持します。最後の解放より後のイベント・末尾の休符は省き、その時点の音源設定で余韻を生成します。
+- ノートオフやペダル解除が欠落している場合は、MIDI終端で解放してから余韻を生成し、完了時に通知します。
+- `XFIH`・`XFKM` など演奏トラック以外の追加情報チャンクは、長さを検証して読み飛ばします。
+- 出力先の親ディレクトリは事前に作成してください。既存ファイルは上書きせず、変換成功時だけWAVを確定します。PCM範囲を超えてクリップした場合は通知します。
+
+対応範囲はSMF Format 0／1、PPQ時間形式、16 MIDIチャンネルです。Format 2、SMPTE時間形式、単独のF7エスケープイベント、発音ノートのないファイルはエラーにします。分割されたSysExは結合し、完結した時刻に処理します。音源はGMSynthの初期設定（Autoモード・初期ゲイン）を使い、アプリの保存設定は読み込みません。WAVはRIFFの4 GiB制限内、入力MIDIは200 MiB以下に限ります。
+
+`--help` で使用方法を表示します。終了コードは成功0、引数エラー2、読み込み・変換・保存エラー1です。
+
+テストにはPython 3も必要です。テスト用MIDI・SoundFontは一時ディレクトリに自動生成します。
+
+```sh
+cmake -S Tools/Render -B Builds/Render/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build Builds/Render/build --target gmsynth-render gmsynth-render-tests -j 4
+ctest --test-dir Builds/Render/build -L gmsynth-render --output-on-failure
+```
+
 ## Runtime
 
 プラグインのUIにある `Load Sound Font` からSoundFontを選択します。
@@ -169,6 +211,43 @@ Then run the following script. It performs Developer ID signing, a Universal Rel
 ```
 
 To change the signing identity or Team ID, copy `scripts/macos/config.env.example` to `scripts/macos/config.env` and edit the local file.
+
+## MIDI to WAV conversion (CLI)
+
+`gmsynth-render` converts one standard MIDI file offline to **48 kHz, 16-bit PCM, stereo WAV**, using the shared GMSynth engine. No audio device or DAW is needed. Supply your own SoundFont.
+
+Build from the repository root on macOS with CMake 3.22+ and a C++17 compiler. This builds the bundled JUCE and FluidSynth submodules; running `build_fluidsynth.sh` separately is unnecessary for the CLI.
+
+```sh
+cmake -S Tools/Render -B Builds/Render/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+cmake --build Builds/Render/build --target gmsynth-render -j 4
+
+Builds/Render/build/bin/gmsynth-render song.mid --soundfont sound.sf2 --output song.wav
+```
+
+If CMake is not on PATH, use its absolute path, such as `/opt/homebrew/bin/cmake`.
+
+The default tail is one bar. Override it using either `--tail-bars 2` or `--tail-seconds 3.5`, but not both. Nonnegative decimals are accepted; zero disables the tail and fade.
+
+- The tail starts at the final note-off or release of the final sustain/sostenuto-held note. Sample release envelopes and reverb are included within this duration.
+- Both output channels, including effects, fade linearly over the entire tail, ending at zero. No automatic normalisation is applied.
+- Bar duration uses the tempo and meter at the release point, without rounding up to a bar boundary. Missing tempo/meter defaults to 120 BPM and 4/4, giving a two-second default tail.
+- Leading and internal rests are retained. Events and rests after the final release are omitted; the tail uses the settings at that release point.
+- Notes still held at MIDI EOF are released there before the tail, with a completion notice.
+- Non-track extension chunks, including `XFIH` and `XFKM`, are skipped after validating their lengths.
+- The output parent directory must exist. Existing files are never overwritten; output is published only on success. Clipping beyond PCM range is reported.
+
+Supports SMF Format 0/1, PPQ timing and 16 MIDI channels. Format 2, SMPTE timing, standalone F7 escape events and files with no sounding Note On events are rejected. Split SysEx messages are reassembled and delivered at completion time. The engine uses its default Auto mode and gain, without loading saved app settings. WAV output must fit the RIFF 4 GiB limit; MIDI input is limited to 200 MiB.
+
+Use `--help` for usage. Exit codes: 0 success, 2 argument error, 1 input/render/output failure.
+
+Tests additionally require Python 3 and generate their own MIDI/SoundFont fixtures in a temporary directory:
+
+```sh
+cmake -S Tools/Render -B Builds/Render/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build Builds/Render/build --target gmsynth-render gmsynth-render-tests -j 4
+ctest --test-dir Builds/Render/build -L gmsynth-render --output-on-failure
+```
 
 ## Runtime
 
